@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MeT-Music_iOS}",
+            "name": "Debug MeTMusic",
+            "target": "MeTMusic",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug MeTMusic"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:MeT-Music_iOS}",
+            "name": "Release MeTMusic",
+            "target": "MeTMusic",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release MeTMusic"
+        }
+    ]
+}
