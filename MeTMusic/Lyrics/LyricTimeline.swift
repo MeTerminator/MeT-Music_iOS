@@ -68,7 +68,12 @@ public final class LyricTimeline {
     private func rebuild(at time: Int64) {
         playing = Set(bounds.indices.filter { time >= bounds[$0].startTime && time < bounds[$0].endTime })
         highlighted = playing
-        scrollTarget = playing.min()
+        // Seeking anchors on the lyric that started most recently. Overlapping
+        // lyrics — duets, a line held over the next one — would otherwise pull
+        // the view back to a lyric that began long before the tapped one.
+        scrollTarget = playing.max(by: {
+            (bounds[$0].startTime, $0) < (bounds[$1].startTime, $1)
+        })
             ?? bounds.firstIndex(where: { $0.startTime >= time })
             ?? max(0, bounds.count - 1)
         startCursor = startOrder.firstIndex { bounds[$0].startTime > time } ?? startOrder.count

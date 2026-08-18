@@ -141,19 +141,38 @@ public struct LyricRenderBounds: Hashable, Sendable {
     }
 }
 
+/// The window a lyric occupies on screen.
+///
+/// The start is the first word actually sung, never `line.startTime`: the
+/// optimizer moves that up to 600 ms earlier for visual anticipation, and the
+/// view already anticipates line changes by `lineTransitionLeadMs` on top. Both
+/// together lit a lyric up almost a second before it was sung, which reads as
+/// lyrics running ahead of the audio. Anticipation now comes from the lead
+/// alone, which is a setting the listener controls.
+///
+/// The end still spans everything the line covers, so trailing words and an
+/// attached background vocal keep the lyric on screen until they finish.
 public func lyricGroupRenderBounds(main: LyricLine, background: LyricLine?) -> LyricRenderBounds {
-    var earliest = min(main.startTime, main.endTime)
-    var latest = max(main.startTime, main.endTime)
-    func include(_ start: Int64, _ end: Int64) {
-        earliest = min(earliest, min(start, end))
-        latest = max(latest, max(start, end))
+    var earliest: Int64?
+    var latest: Int64?
+    func includeSungTimes(of line: LyricLine) {
+        let sung = line.words.filter { !$0.word.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let words = sung.isEmpty ? line.words : sung
+        guard !words.isEmpty else {
+            earliest = min(earliest ?? line.startTime, min(line.startTime, line.endTime))
+            latest = max(latest ?? line.endTime, max(line.startTime, line.endTime))
+            return
+        }
+        for word in words {
+            earliest = min(earliest ?? word.startTime, min(word.startTime, word.endTime))
+            latest = max(latest ?? word.endTime, max(word.startTime, word.endTime))
+        }
+        latest = max(latest ?? line.endTime, line.endTime)
     }
-    main.words.forEach { include($0.startTime, $0.endTime) }
-    if let background {
-        include(background.startTime, background.endTime)
-        background.words.forEach { include($0.startTime, $0.endTime) }
-    }
-    return .init(startTime: earliest, endTime: latest)
+    includeSungTimes(of: main)
+    if let background { includeSungTimes(of: background) }
+    let start = earliest ?? min(main.startTime, main.endTime)
+    return .init(startTime: start, endTime: max(start, latest ?? max(main.startTime, main.endTime)))
 }
 
 public struct InterludeDotsAnimation: Hashable, Sendable {

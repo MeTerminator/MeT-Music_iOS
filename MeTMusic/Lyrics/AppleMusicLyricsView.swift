@@ -119,8 +119,11 @@ public struct AppleMusicLyricsView: View {
                         isActive: isActive,
                         isPageTransitioning: isPageTransitioning || model.isHorizontalSwiping
                     )
+                    // A schedule starting at `.now` is a different schedule on
+                    // every evaluation, and the parent re-evaluates this view
+                    // with every published playback position.
                     TimelineView(.periodic(
-                        from: .now,
+                        from: model.timelineEpoch,
                         by: lyricTimelineInterval(
                             largeScreenOptimizations: largeScreenOptimizations,
                             updatesFrames: updatesFrames
@@ -174,7 +177,12 @@ public struct AppleMusicLyricsView: View {
                                             && !isPageTransitioning && !model.isHorizontalSwiping,
                                         isUserScrolling: model.isUserScrolling,
                                         reduceEffects: !isActive || isPageTransitioning || model.isHorizontalSwiping,
-                                        disableBlur: largeScreenOptimizations,
+                                        // Blurring a lyric costs an offscreen
+                                        // pass, and every lyric scrolled past
+                                        // stays realized, so only the ones that
+                                        // can actually be on screen are blurred.
+                                        disableBlur: largeScreenOptimizations
+                                            || abs(index - snapshot.scrollTargetIndex) > 16,
                                         disableTransforms: largeScreenOptimizations,
                                         style: style,
                                         styleSignature: .init(style),
@@ -395,6 +403,7 @@ private final class LyricsViewModel: ObservableObject {
     private var horizontalSwipeTask: Task<Void, Never>?
     private var autoScrollTask: Task<Void, Never>?
     private var clockCalibrationTask: Task<Void, Never>?
+    let timelineEpoch = Date()
     private var timeline: LyricTimeline
     private var interpolator: PlaybackTimeInterpolator
     private(set) var lastPresentationTimeMs: Int64
@@ -576,8 +585,19 @@ private struct LyricGroupView: View, Equatable {
         .accessibilityAddTraits(active ? .isSelected : [])
     }
 
+    /// Compares by identity rather than by content.
+    ///
+    /// Every rendered lyric runs this check on every frame, and the lyrics that
+    /// stay realized in the lazy stack only accumulate as a song plays, so a
+    /// content comparison — which walks every word, ruby and roman string of
+    /// every lyric on screen — made rendering progressively more expensive the
+    /// longer playback ran. A group's content is fixed for its identity: new
+    /// lyrics arrive as a new source, which rebuilds every group.
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.group == rhs.group
+        lhs.group.id == rhs.group.id
+            && lhs.group.renderBounds == rhs.group.renderBounds
+            && lhs.group.mainChunks.count == rhs.group.mainChunks.count
+            && lhs.group.backgroundChunks.count == rhs.group.backgroundChunks.count
             && lhs.currentTimeMs == rhs.currentTimeMs
             && lhs.active == rhs.active
             && lhs.highlighted == rhs.highlighted

@@ -109,14 +109,16 @@ actor CacheStore {
         remoteURLs["\(songID)-\(quality)"] = .init(url: url, date: Date())
     }
 
-    /// Standalone playback returns the network URL immediately and warms disk in
-    /// the background. Together playback waits for a complete local, seekable file.
+    /// A song that is already cached always plays from disk: a complete local
+    /// file seeks exactly and needs no network. Otherwise standalone playback
+    /// returns the network URL immediately and warms disk in the background,
+    /// while together playback waits for the complete file.
     func audioURL(songID: String, remoteURL: URL, waitForCache: Bool) async throws -> URL {
+        if let cached = cachedAudioURL(songID: songID) { return cached }
         if !waitForCache {
             Task { _ = try? await self.audioURL(songID: songID, remoteURL: remoteURL, waitForCache: true) }
             return remoteURL
         }
-        if let cached = cachedAudioURL(songID: songID) { return cached }
         if let active = activeDownloads[songID] { return try await active.value }
         let songsDirectory = root.appending(path: Category.songs.rawValue, directoryHint: .isDirectory)
         let cachedName = safe(songID)

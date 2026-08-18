@@ -71,6 +71,11 @@ func groupLyricLines(_ lines: [LyricLine]) -> [LyricGroup] {
     return groups
 }
 
+/// Splits a timed word into runs of whitespace and non-whitespace. Compiling
+/// this per word made loading a word-timed song walk the regular expression
+/// engine hundreds of times on the main thread.
+private let wordSplittingExpression = try! NSRegularExpression(pattern: #"\s+|\S+"#)
+
 func chunkLyricWords(_ words: [LyricWord]) -> [LyricWordChunk] {
     var result: [LyricWordChunk] = []
     var group: [LyricWord] = []
@@ -100,8 +105,7 @@ func chunkLyricWords(_ words: [LyricWord]) -> [LyricWordChunk] {
             continue
         }
         let ns = word.word as NSString
-        let expression = try! NSRegularExpression(pattern: #"\s+|\S+"#)
-        let matches = expression.matches(in: word.word, range: NSRange(location: 0, length: ns.length))
+        let matches = wordSplittingExpression.matches(in: word.word, range: NSRange(location: 0, length: ns.length))
         let nonSpaceLength = max(1, word.word.filter { !$0.isWhitespace }.count)
         let duration = word.endTime - word.startTime
         var offset = 0

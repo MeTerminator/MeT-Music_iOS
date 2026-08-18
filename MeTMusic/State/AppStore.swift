@@ -63,6 +63,9 @@ final class AppStore: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
     private var playbackGeneration = 0
     private var accurateSeekGeneration = 0
+    private var activeSeek: Task<Void, Never>?
+    private var requestedSeekTargetMs: Int64?
+    private var seekResumesPlayback = false
     private var standaloneStreamingSongID: String?
     private var standaloneStreamingURL: URL?
     private var toastTask: Task<Void, Never>?
@@ -170,8 +173,16 @@ final class AppStore: ObservableObject {
         if together.isInRoom { together.sendPlayOrPause(); return }
         audio.isPlaying ? pause() : resume()
     }
-    func pause() { audio.pause() }
+    func pause() {
+        // A running seek transaction resumes playback when it finishes, so
+        // pausing during one has to cancel that rather than be overridden.
+        seekResumesPlayback = false
+        audio.pause()
+    }
     func resume() {
+        // The loaded item is still at the pre-seek position while a transaction
+        // runs, so playing it now would start audio somewhere the user left.
+        if activeSeek != nil { seekResumesPlayback = true; return }
         if audio.isReady { audio.resume() }
         else if let currentSong { startStandalone(currentSong) }
     }
@@ -198,42 +209,86 @@ final class AppStore: ObservableObject {
         play(at: previous)
     }
 
+    /// Seeks in one deliberate, sequential transaction: playback pauses, the
+    /// media is made ready to seek — a stream is cached to a complete local
+    /// file first — the player moves to the exact position, and only then does
+    /// playback resume.
+    ///
+    /// Only one transaction runs at a time. Tapping lyrics repeatedly retargets
+    /// the running one instead of starting a second move, so the player is
+    /// never chasing two positions at once and audio always ends up at the
+    /// lyric that was tapped last.
     func seek(to milliseconds: Int64) async {
         if together.isInRoom { together.seek(toSeconds: Double(milliseconds) / 1_000); return }
-        let preparedSeek = audio.prepareSeek(to: milliseconds)
+        requestSeek(to: milliseconds)
+        await activeSeek?.value
+    }
+
+    private func requestSeek(to milliseconds: Int64) {
+        // The requested position is published straight away, so the lyric that
+        // was tapped lights up while the transaction runs.
+        audio.pinSeekTarget(milliseconds)
+        requestedSeekTargetMs = milliseconds
+        guard activeSeek == nil else { return }
+        // Captured before the first pause of a burst of taps, so a later tap
+        // cannot conclude that playback was already stopped.
+        seekResumesPlayback = audio.isPlaying
+        audio.pause()
+        accurateSeekGeneration += 1
+        let request = accurateSeekGeneration
+        let generation = playbackGeneration
+        activeSeek = Task { @MainActor [weak self] in
+            defer { self?.activeSeek = nil }
+            var applied: Int64?
+            while let self, let target = takeRequestedSeekTarget(applied: applied) {
+                guard request == accurateSeekGeneration, generation == playbackGeneration else { return }
+                if await applySeek(to: target) { applied = target }
+            }
+            guard let self, request == accurateSeekGeneration, generation == playbackGeneration else { return }
+            // Every tap pins its target, including one this transaction already
+            // reached, so the last pin is always released here.
+            audio.releaseSeekPin()
+            if seekResumesPlayback { audio.resume() }
+            savePlayback()
+        }
+    }
+
+    /// Returns the position the transaction still has to move to, skipping a
+    /// repeat of the position it already reached — tapping the same lyric again
+    /// must not seek again.
+    private func takeRequestedSeekTarget(applied: Int64?) -> Int64? {
+        guard let target = requestedSeekTargetMs else { return nil }
+        requestedSeekTargetMs = nil
+        return target == applied ? nil : target
+    }
+
+    /// Returns whether playback ended up at `target`, so a repeat tap on the
+    /// same lyric does not move it again.
+    @discardableResult
+    private func applySeek(to target: Int64) async -> Bool {
+        audio.pause()
         guard let song = currentSong,
               standaloneStreamingSongID == song.id,
               let remoteURL = standaloneStreamingURL else {
-            await audio.commitPreparedSeek(preparedSeek)
-            savePlayback()
-            return
+            return await audio.seekExactly(to: target)
         }
-
-        accurateSeekGeneration += 1
-        let request = accurateSeekGeneration
-        let shouldResume = audio.isPlaying
-        audio.pause()
+        // Streamed playback cannot seek precisely, so the complete file is
+        // cached first and playback continues from it.
+        let needsDownload = await cache.cachedAudioURL(songID: song.id) == nil
+        if needsDownload, currentSong?.id == song.id { precacheDownload = .init(songID: song.id) }
         do {
             let localURL = try await cache.audioURL(songID: song.id, remoteURL: remoteURL, waitForCache: true)
-            guard request == accurateSeekGeneration,
-                  currentSong?.id == song.id,
-                  !together.isInRoom else {
-                if request == accurateSeekGeneration { audio.cancelPreparedSeek(preparedSeek) }
-                return
-            }
+            precacheDownload = nil
+            guard currentSong?.id == song.id, !together.isInRoom else { return false }
             standaloneStreamingSongID = nil
             standaloneStreamingURL = nil
-            audio.play(url: localURL, autoPlay: shouldResume, startPositionMs: preparedSeek.positionMs)
+            return await audio.load(url: localURL, autoPlay: false, startPositionMs: target)
         } catch {
-            guard request == accurateSeekGeneration, currentSong?.id == song.id else {
-                if request == accurateSeekGeneration { audio.cancelPreparedSeek(preparedSeek) }
-                return
-            }
-            await audio.commitPreparedSeek(preparedSeek)
-            if shouldResume { audio.resume() }
+            precacheDownload = nil
+            guard currentSong?.id == song.id else { return false }
             showToast("精确跳转缓存失败，已使用串流跳转")
+            return await audio.seekExactly(to: target)
         }
-        savePlayback()
     }
 
     func remotePlay() {
@@ -345,6 +400,8 @@ final class AppStore: ObservableObject {
     private func startStandalone(_ song: Song, startPositionMs: Int64? = nil) {
         playbackGeneration += 1
         accurateSeekGeneration += 1
+        requestedSeekTargetMs = nil
+        seekResumesPlayback = false
         let generation = playbackGeneration
         audio.stop()
         standaloneStreamingSongID = nil
@@ -374,8 +431,11 @@ final class AppStore: ObservableObject {
                 finishPrecache(generation: generation)
                 guard generation == playbackGeneration, currentSong?.id == song.id else { return }
                 let start = startPositionMs ?? restoredPosition(for: song)
-                standaloneStreamingSongID = precaching ? nil : song.id
-                standaloneStreamingURL = precaching ? nil : remote
+                // Only playback that is actually reading the network needs the
+                // cache-then-reload path to seek precisely; a local file seeks
+                // exactly on its own.
+                standaloneStreamingSongID = playbackURL.isFileURL ? nil : song.id
+                standaloneStreamingURL = playbackURL.isFileURL ? nil : remote
                 audio.play(url: playbackURL, startPositionMs: start)
                 if let cover = song.bestCoverURL { Task { _ = try? await cache.coverData(remoteURL: cover) } }
                 let ordinary = await loadOrdinaryLyricResult(for: song)
@@ -466,6 +526,8 @@ final class AppStore: ObservableObject {
 
     func clearStandaloneStreamingSource() {
         accurateSeekGeneration += 1
+        requestedSeekTargetMs = nil
+        seekResumesPlayback = false
         standaloneStreamingSongID = nil
         standaloneStreamingURL = nil
     }

@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreMedia
 import Testing
 @testable import MeTMusic
 
@@ -43,6 +44,52 @@ import Testing
         #expect(groups.count == 1)
         #expect(groups[0].background?.text == "background")
         #expect(groups[0].renderBounds == .init(startTime: 800, endTime: 3_400))
+    }
+
+    @Test func renderBoundsIgnoreTheOptimizersVisualHeadStart() {
+        // The optimizer moves line starts up to 600 ms earlier so lyrics change
+        // with some anticipation. Taking that as the moment a lyric becomes
+        // current — and then adding the transition lead on top — put lyrics
+        // almost a second ahead of the singing.
+        let optimized = optimizeLyricLines([
+            LyricLine(words: [.init(startTime: 10_000, endTime: 12_000, word: "第一句")], startTime: 10_000, endTime: 12_000),
+            LyricLine(words: [.init(startTime: 20_000, endTime: 23_000, word: "第二句")], startTime: 20_000, endTime: 23_000),
+        ])
+        #expect(optimized[1].startTime < 20_000)
+
+        let groups = groupLyricLines(optimized)
+        #expect(groups[1].renderBounds.startTime == 20_000)
+        #expect(groups[1].renderBounds.endTime == 23_000)
+    }
+
+    @Test func renderBoundsStartAtTheFirstSungWord() {
+        let line = LyricLine(
+            words: [
+                .init(startTime: 4_000, endTime: 4_000, word: " "),
+                .init(startTime: 5_000, endTime: 6_000, word: "词"),
+            ],
+            startTime: 4_400,
+            endTime: 6_400
+        )
+        let bounds = lyricGroupRenderBounds(main: line, background: nil)
+        #expect(bounds.startTime == 5_000)
+        // A line that runs past its last word keeps the lyric on screen.
+        #expect(bounds.endTime == 6_400)
+    }
+
+    @Test func seekingAnchorsOnTheMostRecentlyStartedLyric() {
+        // A lyric held over the next one, or a duet part, keeps playing while
+        // the tapped lyric starts. Anchoring on the earliest of them scrolled
+        // the view to a lyric that began long before the one that was tapped.
+        let timeline = LyricTimeline(bounds: [
+            .init(startTime: 0, endTime: 20_000),
+            .init(startTime: 8_000, endTime: 12_000),
+        ])
+        _ = timeline.sync(timeMs: 1_000)
+        let snapshot = timeline.sync(timeMs: 9_000)
+        #expect(snapshot.isSeeking)
+        #expect(snapshot.playingIndices == [0, 1])
+        #expect(snapshot.scrollTargetIndex == 1)
     }
 
     @Test func syllableChunksUseContinuousProgress() {
@@ -117,6 +164,29 @@ import Testing
             isPositioned: true,
             hasPendingSeek: false
         ))
+    }
+
+    @Test func aSeekIsOnlyDoneWhenThePlayerLandedOnTheTarget() {
+        // Tapping the same lyric repeatedly used to leave audio in a different
+        // place every time, because an overtaken seek reports back after the
+        // player already moved elsewhere. The result is checked, not trusted.
+        #expect(seekLandedOnTarget(finished: true, actualPositionMs: 90_040, targetPositionMs: 90_000))
+        #expect(!seekLandedOnTarget(finished: false, actualPositionMs: 90_000, targetPositionMs: 90_000))
+        #expect(!seekLandedOnTarget(finished: true, actualPositionMs: 87_000, targetPositionMs: 90_000))
+    }
+
+    @Test func seekWaitsUntilTheMediaCanServeTheRequestedPosition() {
+        let buffered = [CMTimeRange(
+            start: CMTime(value: 0, timescale: 1_000),
+            duration: CMTime(value: 45_000, timescale: 1_000)
+        )]
+        #expect(seekableRangesCover(30_000, ranges: buffered))
+        // Seeking into a part of the stream that has not arrived lands wherever
+        // the player can manage, so the transaction waits for the cached file.
+        #expect(!seekableRangesCover(90_000, ranges: buffered))
+        #expect(!seekableRangesCover(30_000, ranges: []))
+        // The very end of a song is the end of its seekable range.
+        #expect(seekableRangesCover(45_000, ranges: buffered))
     }
 
     @Test func lyricTapUsesAuthoredWordTimeInsteadOfAdvancedVisualStart() {
