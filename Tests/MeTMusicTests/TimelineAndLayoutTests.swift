@@ -75,6 +75,50 @@ import Testing
         ) == 1_000)
     }
 
+    @Test func playbackClockDoesNotLoseTimeWhenIPadMissesFrames() {
+        var clock = PlaybackTimeInterpolator(initialSourceTimeMs: 1_000)
+        #expect(clock.update(
+            sourceTimeMs: 1_000,
+            frameNanoseconds: 0,
+            isPlaying: true
+        ) == 1_000)
+        #expect(clock.update(
+            sourceTimeMs: 1_200,
+            frameNanoseconds: 200_000_000,
+            isPlaying: true
+        ) == 1_200)
+        #expect(clock.update(
+            sourceTimeMs: 1_400,
+            frameNanoseconds: 400_000_000,
+            isPlaying: true
+        ) == 1_400)
+    }
+
+    @Test func lyricClockIgnoresPlayerTimeUntilTheNewItemReachesTheSeekTarget() {
+        // Seeking a streamed song reloads the item, so AVPlayer keeps reporting
+        // the previous item's time and then zero before it reaches the target.
+        #expect(!playbackClockDescribesRequestedPosition(
+            hasCurrentItem: true,
+            isPositioned: true,
+            hasPendingSeek: true
+        ))
+        #expect(!playbackClockDescribesRequestedPosition(
+            hasCurrentItem: true,
+            isPositioned: false,
+            hasPendingSeek: false
+        ))
+        #expect(!playbackClockDescribesRequestedPosition(
+            hasCurrentItem: false,
+            isPositioned: true,
+            hasPendingSeek: false
+        ))
+        #expect(playbackClockDescribesRequestedPosition(
+            hasCurrentItem: true,
+            isPositioned: true,
+            hasPendingSeek: false
+        ))
+    }
+
     @Test func lyricTapUsesAuthoredWordTimeInsteadOfAdvancedVisualStart() {
         let line = LyricLine(
             words: [
@@ -85,6 +129,60 @@ import Testing
             endTime: 2_600
         )
         #expect(lyricTapSeekTime(line: line, lyricOffsetMs: 100) == 1_900)
+    }
+
+    @Test func lyricTapRoundTripKeepsWordProgressAlignedWithAudio() {
+        let line = LyricLine(
+            words: [.init(startTime: 2_000, endTime: 2_600, word: "歌词")],
+            startTime: 1_400,
+            endTime: 2_600
+        )
+        let offset: Int64 = 100
+        let lead: Int64 = 300
+        let mediaTarget = lyricTapSeekTime(line: line, lyricOffsetMs: offset)
+        let presentationTime = lyricPresentationTime(
+            mediaPositionMs: mediaTarget,
+            lyricOffsetMs: offset
+        )
+
+        #expect(presentationTime == 2_000)
+        #expect(lyricTimelineTime(
+            presentationTimeMs: presentationTime,
+            lineTransitionLeadMs: lead
+        ) == 2_300)
+    }
+
+    @Test func singleTimedWordLineUsesNormalLineOpacity() {
+        #expect(lyricLineOpacity(isHighlighted: false) == 1)
+        #expect(lyricLineOpacity(isHighlighted: true) == 0.85)
+    }
+
+    @Test func interludeDotsRequireACompletelyEmptyTimeline() {
+        let overlappingTimeline = LyricTimeline(bounds: [
+            .init(startTime: 0, endTime: 10_000),
+            .init(startTime: 1_000, endTime: 2_000),
+            .init(startTime: 8_000, endTime: 9_000),
+        ])
+        let overlapping = overlappingTimeline.sync(timeMs: 5_000)
+
+        #expect(shouldShowLyricInterlude(
+            previousEndTimeMs: 2_000,
+            nextStartTimeMs: 8_000,
+            currentTimeMs: 5_000,
+            hasActiveLyrics: false
+        ))
+        #expect(!shouldShowLyricInterlude(
+            previousEndTimeMs: 2_000,
+            nextStartTimeMs: 8_000,
+            currentTimeMs: 5_000,
+            hasActiveLyrics: !overlapping.playingIndices.isEmpty
+        ))
+        #expect(!shouldShowLyricInterlude(
+            previousEndTimeMs: 2_000,
+            nextStartTimeMs: 8_000,
+            currentTimeMs: 8_000,
+            hasActiveLyrics: false
+        ))
     }
 
     @Test func interludeAndEmphasisAnimationsMatchBoundaries() {

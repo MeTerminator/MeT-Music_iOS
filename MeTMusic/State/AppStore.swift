@@ -48,6 +48,10 @@ final class AppStore: ObservableObject {
     @Published var translationFontSize: Double = 15
     @Published var removeQRCInformation = true
     @Published var syncThresholdSeconds = 0.3
+    @Published var precacheEnabled = false
+    /// Set while precache mode holds playback back for the current song, so the
+    /// player can show download progress in place of the playback progress bar.
+    @Published private(set) var precacheDownload: AudioDownloadProgress?
     @Published var cacheSizes: [CacheStore.Category: Int64] = [:]
     @Published var toast: String?
 
@@ -68,6 +72,7 @@ final class AppStore: ObservableObject {
         restoreSettings()
         restorePlayback()
         bindPlayer()
+        observeDownloadProgress()
         _ = nowPlaying
         if !qqID.isEmpty {
             isLoggedIn = true
@@ -212,12 +217,18 @@ final class AppStore: ObservableObject {
             let localURL = try await cache.audioURL(songID: song.id, remoteURL: remoteURL, waitForCache: true)
             guard request == accurateSeekGeneration,
                   currentSong?.id == song.id,
-                  !together.isInRoom else { return }
+                  !together.isInRoom else {
+                if request == accurateSeekGeneration { audio.cancelPreparedSeek(preparedSeek) }
+                return
+            }
             standaloneStreamingSongID = nil
             standaloneStreamingURL = nil
             audio.play(url: localURL, autoPlay: shouldResume, startPositionMs: preparedSeek.positionMs)
         } catch {
-            guard request == accurateSeekGeneration, currentSong?.id == song.id else { return }
+            guard request == accurateSeekGeneration, currentSong?.id == song.id else {
+                if request == accurateSeekGeneration { audio.cancelPreparedSeek(preparedSeek) }
+                return
+            }
             await audio.commitPreparedSeek(preparedSeek)
             if shouldResume { audio.resume() }
             showToast("精确跳转缓存失败，已使用串流跳转")
@@ -240,6 +251,11 @@ final class AppStore: ObservableObject {
     func cyclePlaybackMode() {
         let modes = PlaybackMode.allCases
         setPlaybackMode(modes[(modes.firstIndex(of: playbackMode)! + 1) % modes.count])
+    }
+
+    func setPrecacheEnabled(_ enabled: Bool) {
+        precacheEnabled = enabled
+        defaults.set(enabled, forKey: "precache_mode")
     }
 
     func setQuality(_ quality: String) {
@@ -331,19 +347,35 @@ final class AppStore: ObservableObject {
         accurateSeekGeneration += 1
         let generation = playbackGeneration
         audio.stop()
+        standaloneStreamingSongID = nil
+        standaloneStreamingURL = nil
         lyrics = []
         ttmlAuthor = nil
+        precacheDownload = nil
+        // Precache mode downloads the complete file before playing, so playback
+        // reads a local, fully seekable file instead of the network stream.
+        let precaching = precacheEnabled
         Task {
             do {
                 let remote: URL
                 if let cached = await cache.remoteURL(songID: song.id, quality: soundQuality) { remote = cached }
                 else { remote = try await api.songURL(id: song.id, quality: soundQuality) }
                 await cache.setRemoteURL(remote, songID: song.id, quality: soundQuality)
-                let playbackURL = try await cache.audioURL(songID: song.id, remoteURL: remote, waitForCache: false)
+                // An already cached song needs no download bar at all.
+                let needsDownload = await cache.cachedAudioURL(songID: song.id) == nil
+                if precaching, needsDownload, generation == playbackGeneration, currentSong?.id == song.id {
+                    precacheDownload = .init(songID: song.id)
+                }
+                let playbackURL = try await cache.audioURL(
+                    songID: song.id,
+                    remoteURL: remote,
+                    waitForCache: precaching
+                )
+                finishPrecache(generation: generation)
                 guard generation == playbackGeneration, currentSong?.id == song.id else { return }
                 let start = startPositionMs ?? restoredPosition(for: song)
-                standaloneStreamingSongID = song.id
-                standaloneStreamingURL = remote
+                standaloneStreamingSongID = precaching ? nil : song.id
+                standaloneStreamingURL = precaching ? nil : remote
                 audio.play(url: playbackURL, startPositionMs: start)
                 if let cover = song.bestCoverURL { Task { _ = try? await cache.coverData(remoteURL: cover) } }
                 let ordinary = await loadOrdinaryLyricResult(for: song)
@@ -355,6 +387,7 @@ final class AppStore: ObservableObject {
                 preloadNext()
             } catch {
                 guard generation == playbackGeneration else { return }
+                precacheDownload = nil
                 showToast("播放失败：\(error.localizedDescription)")
                 next(auto: true)
             }
@@ -413,6 +446,24 @@ final class AppStore: ObservableObject {
         audio.$isPlaying.dropFirst().sink { [weak self] _ in self?.savePlayback() }.store(in: &cancellables)
     }
 
+    /// Background warm-ups report progress too, so only the song playback is
+    /// actually waiting on may drive the player's download bar.
+    private func observeDownloadProgress() {
+        let updates = cache.downloadProgressUpdates
+        Task { [weak self] in
+            for await progress in updates {
+                guard let self else { return }
+                guard precacheDownload?.songID == progress.songID else { continue }
+                precacheDownload = progress
+            }
+        }
+    }
+
+    private func finishPrecache(generation: Int) {
+        guard generation == playbackGeneration else { return }
+        precacheDownload = nil
+    }
+
     func clearStandaloneStreamingSource() {
         accurateSeekGeneration += 1
         standaloneStreamingSongID = nil
@@ -428,6 +479,7 @@ final class AppStore: ObservableObject {
         translationFontSize = defaults.object(forKey: "translation_font_size") == nil ? 15 : defaults.double(forKey: "translation_font_size")
         removeQRCInformation = defaults.object(forKey: "remove_qrc_song_info") == nil ? true : defaults.bool(forKey: "remove_qrc_song_info")
         syncThresholdSeconds = defaults.object(forKey: "sync_threshold") == nil ? 0.3 : defaults.double(forKey: "sync_threshold")
+        precacheEnabled = defaults.bool(forKey: "precache_mode")
         qqID = defaults.string(forKey: "qq_id") ?? ""
         nickname = defaults.string(forKey: "nickname") ?? (qqID.isEmpty ? "未登录" : qqID)
         avatarURL = defaults.string(forKey: "avatar_url") ?? ""

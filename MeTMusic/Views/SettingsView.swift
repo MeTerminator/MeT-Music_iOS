@@ -55,7 +55,11 @@ struct SettingsView: View {
                         }), in: 11...22, step: 1)
                     }
                 }
-                Section("缓存") {
+                Section {
+                    Toggle("预缓存模式", isOn: Binding(
+                        get: { store.precacheEnabled },
+                        set: store.setPrecacheEnabled
+                    ))
                     NavigationLink("管理已缓存音频") { CachedAudioView() }
                     ForEach(CacheStore.Category.allCases, id: \.self) { category in
                         HStack {
@@ -67,6 +71,10 @@ struct SettingsView: View {
                             Button("清理", role: .destructive) { Task { await store.clearCache(category) } }
                         }
                     }
+                } header: {
+                    Text("缓存")
+                } footer: {
+                    Text("预缓存模式会先把整首歌下载完再开始播放，下载期间播放进度条显示下载进度。")
                 }
                 Section("关于") {
                     LabeledContent("应用", value: "MeT-Music iOS")

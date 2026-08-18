@@ -19,6 +19,19 @@ final class AudioPlayer: ObservableObject {
     private var generation = 0
     private var pendingSeekRevision: UInt?
     private var suppressPeriodicPositionUpdatesUntil = Date.distantPast
+    /// AVPlayer's clock only describes the requested playback position once the
+    /// current item is loaded and positioned. Before that it still reports the
+    /// previous item's time, and then zero for the freshly installed item, so
+    /// every consumer must fall back to the published target position instead.
+    private var clockIsAuthoritative = false
+
+    private var playbackClockIsUsable: Bool {
+        playbackClockDescribesRequestedPosition(
+            hasCurrentItem: player.currentItem != nil,
+            isPositioned: clockIsAuthoritative,
+            hasPendingSeek: pendingSeekRevision != nil
+        )
+    }
 
     struct PreparedSeek: Sendable {
         let positionMs: Int64
@@ -40,7 +53,7 @@ final class AudioPlayer: ObservableObject {
                 guard let self else { return }
                 let seconds = time.seconds
                 if seconds.isFinite,
-                   pendingSeekRevision == nil,
+                   playbackClockIsUsable,
                    Date.now >= suppressPeriodicPositionUpdatesUntil {
                     positionMs = max(0, Int64((seconds * 1_000).rounded()))
                 }
@@ -57,6 +70,7 @@ final class AudioPlayer: ObservableObject {
         isPlaying = false
         isReady = false
         pendingSeekRevision = nil
+        clockIsAuthoritative = false
         suppressPeriodicPositionUpdatesUntil = Date.now.addingTimeInterval(0.15)
         positionMs = max(0, startPositionMs)
         durationMs = 0
@@ -83,7 +97,9 @@ final class AudioPlayer: ObservableObject {
                     }
                     positionMs = actualPosition
                 }
-                if autoPlay, request == generation { player.play(); isPlaying = true }
+                guard request == generation else { return }
+                clockIsAuthoritative = true
+                if autoPlay { player.play(); isPlaying = true }
             } catch {
                 guard request == generation else { return }
                 isReady = false
@@ -101,6 +117,7 @@ final class AudioPlayer: ObservableObject {
         player.replaceCurrentItem(with: nil)
         statusObservation = nil
         pendingSeekRevision = nil
+        clockIsAuthoritative = false
         suppressPeriodicPositionUpdatesUntil = .distantPast
         isPlaying = false; isReady = false; positionMs = 0; durationMs = 0
     }
@@ -110,12 +127,23 @@ final class AudioPlayer: ObservableObject {
         await commitPreparedSeek(prepared)
     }
 
+    /// Returns AVPlayer's current media time for display-cadence lyric
+    /// rendering. The published position intentionally updates less often for
+    /// the rest of the UI and can be delayed by a busy large-screen layout.
+    /// While a seek is pending, or while a new item is still loading, keep
+    /// exposing the target position so a stale player time cannot pull the
+    /// lyrics back before playback actually reaches the requested position.
+    func lyricClockPositionMs() -> Int64 {
+        guard playbackClockIsUsable else { return positionMs }
+        return playerPositionMs(fallback: positionMs)
+    }
+
     /// Re-anchors lyric interpolation to AVPlayer's authoritative clock at a
     /// lyric-line boundary. This is deliberately low frequency and is skipped
     /// while a seek is still pending, because seek completion performs its own
     /// authoritative reconciliation.
     func calibrateLyricClockAtLineBoundary() {
-        guard player.currentItem != nil, pendingSeekRevision == nil else { return }
+        guard playbackClockIsUsable else { return }
         let actualPosition = playerPositionMs(fallback: positionMs)
         positionMs = actualPosition
         playbackDiscontinuityRevision &+= 1
@@ -144,12 +172,21 @@ final class AudioPlayer: ObservableObject {
         guard generation == prepared.generation,
               playbackDiscontinuityRevision == prepared.revision else { return }
         pendingSeekRevision = nil
+        clockIsAuthoritative = player.currentItem != nil
         suppressPeriodicPositionUpdatesUntil = Date.now.addingTimeInterval(0.15)
         let actualPosition = playerPositionMs(fallback: completed ? prepared.positionMs : 0)
         if !completed || abs(actualPosition - prepared.positionMs) > 80 {
             playbackDiscontinuityRevision &+= 1
         }
         positionMs = actualPosition
+    }
+
+    /// Releases a prepared seek that will never be committed, so the position
+    /// stays pinned to a target no playback is moving towards.
+    func cancelPreparedSeek(_ prepared: PreparedSeek) {
+        guard generation == prepared.generation,
+              pendingSeekRevision == prepared.revision else { return }
+        pendingSeekRevision = nil
     }
 
     @discardableResult
@@ -210,4 +247,21 @@ final class AudioPlayer: ObservableObject {
         }.value
         #endif
     }
+}
+
+/// Decides whether AVPlayer's own clock describes the position playback was
+/// asked to reach.
+///
+/// It does not during a pending seek, and it does not while a new item is being
+/// installed: the player keeps reporting the previous item's time, then reports
+/// zero for the freshly replaced item, and only reaches the requested position
+/// once the item is ready and the start seek has completed. Reading it in that
+/// window is what made lyrics jump back to the pre-seek line — and then to the
+/// first line — while the progress bar already showed the new position.
+func playbackClockDescribesRequestedPosition(
+    hasCurrentItem: Bool,
+    isPositioned: Bool,
+    hasPendingSeek: Bool
+) -> Bool {
+    hasCurrentItem && isPositioned && !hasPendingSeek
 }

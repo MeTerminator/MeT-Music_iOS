@@ -231,7 +231,17 @@ struct PlayerView: View {
             }
             AppleMusicLyricsView(
                 lyricLines: store.lyrics,
-                currentTimeMs: store.audio.positionMs + store.lyricOffsetMs + store.lyricLeadMs,
+                currentTimeMs: lyricPresentationTime(
+                    mediaPositionMs: store.audio.positionMs,
+                    lyricOffsetMs: store.lyricOffsetMs
+                ),
+                currentTimeProvider: {
+                    lyricPresentationTime(
+                        mediaPositionMs: store.audio.lyricClockPositionMs(),
+                        lyricOffsetMs: store.lyricOffsetMs
+                    )
+                },
+                lineTransitionLeadMs: store.lyricLeadMs,
                 playbackDiscontinuityRevision: store.audio.playbackDiscontinuityRevision,
                 isPlaying: store.audio.isPlaying,
                 isActive: compactChrome || model.page == 1,
@@ -372,33 +382,45 @@ struct PlayerView: View {
     private var progressSection: some View {
         GeometryReader { geometry in
             VStack(spacing: 5) {
-                PlayerScrubber(
-                    value: Binding(
-                        get: { displayedScrubValue },
-                        set: { model.scrubValue = $0 }
-                    ),
-                    upperBound: Double(max(store.audio.durationMs, store.currentSong?.durationMs ?? 1, 1))
-                ) { editing in
-                    if editing {
-                        model.beginControlInteraction()
-                        model.scrubValue = Double(store.audio.positionMs)
-                    } else {
-                        model.endControlInteraction()
+                if let download = store.precacheDownload {
+                    DownloadProgressBar(fraction: audioDownloadFraction(
+                        receivedBytes: download.receivedBytes,
+                        expectedBytes: download.expectedBytes
+                    ))
+                    .frame(width: geometry.size.width)
+                    Text(audioDownloadStatusText(download))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.5))
+                        .frame(width: geometry.size.width)
+                } else {
+                    PlayerScrubber(
+                        value: Binding(
+                            get: { displayedScrubValue },
+                            set: { model.scrubValue = $0 }
+                        ),
+                        upperBound: Double(max(store.audio.durationMs, store.currentSong?.durationMs ?? 1, 1))
+                    ) { editing in
+                        if editing {
+                            model.beginControlInteraction()
+                            model.scrubValue = Double(store.audio.positionMs)
+                        } else {
+                            model.endControlInteraction()
+                        }
+                        model.scrubbing = editing
+                        if !editing {
+                            Task { await store.seek(to: Int64(model.scrubValue.rounded())) }
+                        }
                     }
-                    model.scrubbing = editing
-                    if !editing {
-                        Task { await store.seek(to: Int64(model.scrubValue.rounded())) }
+                    .frame(width: geometry.size.width)
+                    HStack(spacing: 0) {
+                        Text(format(Int64(displayedScrubValue)))
+                            .frame(width: geometry.size.width / 2, alignment: .leading)
+                        Text("-" + format(max(0, effectiveDuration - Int64(displayedScrubValue))))
+                            .frame(width: geometry.size.width / 2, alignment: .trailing)
                     }
+                    .font(.caption2.monospacedDigit())
+                    .foregroundStyle(.white.opacity(0.5))
                 }
-                .frame(width: geometry.size.width)
-                HStack(spacing: 0) {
-                    Text(format(Int64(displayedScrubValue)))
-                        .frame(width: geometry.size.width / 2, alignment: .leading)
-                    Text("-" + format(max(0, effectiveDuration - Int64(displayedScrubValue))))
-                        .frame(width: geometry.size.width / 2, alignment: .trailing)
-                }
-                .font(.caption2.monospacedDigit())
-                .foregroundStyle(.white.opacity(0.5))
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
@@ -564,6 +586,39 @@ private struct PlayerVolumeSlider: View {
         .onDisappear {
             if editing { onEditingChanged(false) }
         }
+    }
+}
+
+/// Replaces the playback scrubber while precache mode downloads the song. It
+/// deliberately keeps the scrubber's track geometry so the controls below do
+/// not shift when playback finally starts.
+private struct DownloadProgressBar: View {
+    let fraction: Double?
+
+    var body: some View {
+        GeometryReader { geometry in
+            Group {
+                if let fraction {
+                    ZStack(alignment: .leading) {
+                        Capsule().fill(.white.opacity(0.24))
+                        Capsule()
+                            .fill(.white.opacity(0.86))
+                            .frame(width: geometry.size.width * min(max(fraction, 0), 1))
+                    }
+                    .animation(.easeOut(duration: 0.2), value: fraction)
+                } else {
+                    ProgressView()
+                        .progressViewStyle(.linear)
+                        .tint(.white.opacity(0.86))
+                }
+            }
+            .frame(height: 5)
+            .frame(maxHeight: .infinity)
+        }
+        .frame(height: 18)
+        .accessibilityElement()
+        .accessibilityLabel("下载中")
+        .accessibilityValue(fraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "")
     }
 }
 

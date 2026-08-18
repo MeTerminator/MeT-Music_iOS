@@ -7,6 +7,29 @@ import FoundationNetworking
 
 let supportedAudioFileExtensions: Set<String> = ["mp3", "m4a", "mp4", "aac", "flac", "wav", "ogg", "opus"]
 
+struct AudioDownloadProgress: Sendable, Equatable {
+    var songID: String
+    var receivedBytes: Int64 = 0
+    var expectedBytes: Int64 = 0
+}
+
+/// Nil while the download length is still unknown, which is what a server that
+/// sends no content length leaves us with.
+func audioDownloadFraction(receivedBytes: Int64, expectedBytes: Int64) -> Double? {
+    guard expectedBytes > 0 else { return nil }
+    return min(max(Double(receivedBytes) / Double(expectedBytes), 0), 1)
+}
+
+/// Label shown under the download progress bar while precache mode holds
+/// playback back. The percentage is only appended once it is actually known.
+func audioDownloadStatusText(_ progress: AudioDownloadProgress) -> String {
+    guard let fraction = audioDownloadFraction(
+        receivedBytes: progress.receivedBytes,
+        expectedBytes: progress.expectedBytes
+    ) else { return "下载中" }
+    return "下载中 \(Int((fraction * 100).rounded()))%"
+}
+
 func preferredAudioFileExtension(
     remoteURL: URL,
     mimeType: String? = nil,
@@ -51,10 +74,20 @@ actor CacheStore {
     private let encoder = JSONEncoder()
     private let decoder = JSONDecoder()
     private var activeDownloads: [String: Task<URL, Error>] = [:]
+    /// Broadcasts byte progress for every audio download, whether it is a
+    /// precache the player is waiting on or a background warm-up.
+    nonisolated let downloadProgressUpdates: AsyncStream<AudioDownloadProgress>
+    private nonisolated let downloadProgressContinuation: AsyncStream<AudioDownloadProgress>.Continuation
     private var activeCoverDownloads: [String: Task<Data, Error>] = [:]
     private var remoteURLs: [String: RemoteEntry] = [:]
 
     init() {
+        let (stream, continuation) = AsyncStream.makeStream(
+            of: AudioDownloadProgress.self,
+            bufferingPolicy: .bufferingNewest(4)
+        )
+        downloadProgressUpdates = stream
+        downloadProgressContinuation = continuation
         let base = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
         root = base.appending(path: "MeTMusic", directoryHint: .isDirectory)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -87,14 +120,20 @@ actor CacheStore {
         if let active = activeDownloads[songID] { return try await active.value }
         let songsDirectory = root.appending(path: Category.songs.rawValue, directoryHint: .isDirectory)
         let cachedName = safe(songID)
+        let progress = downloadProgressContinuation
         let task = Task<URL, Error> {
-            let (temporary, response) = try await URLSession.shared.download(from: remoteURL)
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-            guard (200..<300).contains(status) else { throw APIError.invalidResponse(status) }
+            let downloaded = try await AudioDownloader.shared.download(from: remoteURL) { received, expected in
+                progress.yield(.init(songID: songID, receivedBytes: received, expectedBytes: expected))
+            }
+            let temporary = downloaded.url
+            guard (200..<300).contains(downloaded.statusCode) else {
+                try? FileManager.default.removeItem(at: temporary)
+                throw APIError.invalidResponse(downloaded.statusCode)
+            }
             let fileExtension = preferredAudioFileExtension(
                 remoteURL: remoteURL,
-                mimeType: response.mimeType,
-                suggestedFilename: response.suggestedFilename
+                mimeType: downloaded.mimeType,
+                suggestedFilename: downloaded.suggestedFilename
             )
             let destination = songsDirectory.appending(path: "\(cachedName).\(fileExtension)")
             let oldFiles = (try? FileManager.default.contentsOfDirectory(

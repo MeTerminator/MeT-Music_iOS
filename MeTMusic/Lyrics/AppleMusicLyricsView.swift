@@ -33,6 +33,8 @@ public enum LyricsHorizontalSwipeDirection: Sendable {
 public struct AppleMusicLyricsView: View {
     public let lyricLines: [LyricLine]
     public let currentTimeMs: Int64
+    public let currentTimeProvider: (@MainActor () -> Int64)?
+    public let lineTransitionLeadMs: Int64
     public let playbackDiscontinuityRevision: UInt
     public let isPlaying: Bool
     public let isActive: Bool
@@ -52,6 +54,8 @@ public struct AppleMusicLyricsView: View {
     public init(
         lyricLines: [LyricLine],
         currentTimeMs: Int64,
+        currentTimeProvider: (@MainActor () -> Int64)? = nil,
+        lineTransitionLeadMs: Int64 = 0,
         playbackDiscontinuityRevision: UInt = 0,
         isPlaying: Bool,
         isActive: Bool = true,
@@ -68,6 +72,8 @@ public struct AppleMusicLyricsView: View {
     ) {
         self.lyricLines = lyricLines
         self.currentTimeMs = currentTimeMs
+        self.currentTimeProvider = currentTimeProvider
+        self.lineTransitionLeadMs = lineTransitionLeadMs
         self.playbackDiscontinuityRevision = playbackDiscontinuityRevision
         self.isPlaying = isPlaying
         self.isActive = isActive
@@ -120,16 +126,23 @@ public struct AppleMusicLyricsView: View {
                             updatesFrames: updatesFrames
                         )
                     )) { context in
+                        let usesAuthoritativeClock = currentTimeProvider != nil
+                        let sourceTime = currentTimeProvider?() ?? currentTimeMs
                         let time = model.presentationTime(
-                            sourceTimeMs: currentTimeMs,
+                            sourceTimeMs: sourceTime,
                             frameDate: context.date,
                             isPlaying: isPlaying,
                             enabled: style.enableFrameInterpolation && isActive
-                                && !isPageTransitioning && !model.isHorizontalSwiping,
+                                && !isPageTransitioning && !model.isHorizontalSwiping
+                                && !usesAuthoritativeClock,
                             playbackRate: style.playbackRate,
                             discontinuityRevision: playbackDiscontinuityRevision
                         )
-                        let snapshot = model.sync(timeMs: time)
+                        let timelineTime = lyricTimelineTime(
+                            presentationTimeMs: time,
+                            lineTransitionLeadMs: lineTransitionLeadMs
+                        )
+                        let snapshot = model.sync(timeMs: timelineTime)
                         LazyVStack(spacing: style.lineSpacing) {
                             Color.clear.frame(height: geometry.size.height * style.alignPosition)
                             ForEach(groups.indices, id: \.self) { index in
@@ -137,12 +150,15 @@ public struct AppleMusicLyricsView: View {
                                 let active = snapshot.playingIndices.contains(index)
                                 VStack(alignment: group.main.isDuet ? .trailing : .leading, spacing: style.lineSpacing) {
                                     if let previous = groups[safe: index - 1],
-                                       group.main.startTime - previous.renderBounds.endTime >= 4_000,
-                                       time >= previous.renderBounds.endTime,
-                                       time <= group.main.startTime {
+                                       shouldShowLyricInterlude(
+                                           previousEndTimeMs: previous.renderBounds.endTime,
+                                           nextStartTimeMs: group.main.startTime,
+                                           currentTimeMs: timelineTime,
+                                           hasActiveLyrics: !snapshot.playingIndices.isEmpty
+                                       ) {
                                         InterludeDotsView(
                                             animation: calculateInterludeDotsAnimation(
-                                                elapsedMs: time - previous.renderBounds.endTime,
+                                                elapsedMs: timelineTime - previous.renderBounds.endTime,
                                                 durationMs: group.main.startTime - previous.renderBounds.endTime
                                             ),
                                             color: style.activeColor,
@@ -231,7 +247,10 @@ public struct AppleMusicLyricsView: View {
                 .onChange(of: geometry.size) { _, newSize in
                     model.layoutDidChange()
                     guard lyricViewportIsUsable(newSize) else { return }
-                    let snapshot = model.sync(timeMs: model.lastPresentationTimeMs)
+                    let snapshot = model.sync(timeMs: lyricTimelineTime(
+                        presentationTimeMs: model.lastPresentationTimeMs,
+                        lineTransitionLeadMs: lineTransitionLeadMs
+                    ))
                     let index = snapshot.scrollTargetIndex
                     guard groups.indices.contains(index) else { return }
                     scrollImmediately(proxy: proxy, to: groups[index].id)
@@ -297,7 +316,10 @@ public struct AppleMusicLyricsView: View {
             try? await Task.sleep(for: style.userScrollResumeDelay)
             guard !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: 0.2)) { model.isUserScrolling = false }
-            let latest = model.sync(timeMs: model.lastPresentationTimeMs)
+            let latest = model.sync(timeMs: lyricTimelineTime(
+                presentationTimeMs: model.lastPresentationTimeMs,
+                lineTransitionLeadMs: lineTransitionLeadMs
+            ))
             guard groups.indices.contains(latest.scrollTargetIndex) else { return }
             scroll(
                 proxy: proxy,
@@ -542,7 +564,7 @@ private struct LyricGroupView: View, Equatable {
             if !backgroundFirst { background(attachedAbove: false) }
         }
         .foregroundStyle(highlighted ? style.activeColor : style.inactiveColor)
-        .opacity(highlighted ? 0.85 : (group.main.words.count > 1 ? 1 : 0.2))
+        .opacity(lyricLineOpacity(isHighlighted: highlighted))
         .scaleEffect(style.enableScale && !disableTransforms && !reduceEffects && !highlighted && isPlaying ? 0.97 : 1,
                      anchor: group.main.isDuet ? .trailing : .leading)
         .blur(radius: style.enableBlur && !disableBlur && !reduceEffects && !isUserScrolling && !highlighted ? 2.2 : 0)

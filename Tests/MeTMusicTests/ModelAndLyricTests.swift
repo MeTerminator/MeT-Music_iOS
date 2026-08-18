@@ -113,4 +113,18 @@ import Testing
         let data = try #require(object["data"] as? [String: Any])
         #expect(data["currentTime"] as? Double == 12.5)
     }
+
+    @Test func precacheDownloadReportsFractionOnlyWhenTheLengthIsKnown() {
+        #expect(audioDownloadFraction(receivedBytes: 512, expectedBytes: 2_048) == 0.25)
+        #expect(audioDownloadFraction(receivedBytes: 4_096, expectedBytes: 2_048) == 1)
+        // URLSession reports -1 for a response without a content length.
+        #expect(audioDownloadFraction(receivedBytes: 512, expectedBytes: -1) == nil)
+        #expect(audioDownloadFraction(receivedBytes: 0, expectedBytes: 0) == nil)
+    }
+
+    @Test func precacheStatusTextAlwaysAnnouncesDownloading() {
+        #expect(audioDownloadStatusText(.init(songID: "a", receivedBytes: 512, expectedBytes: 2_048)) == "下载中 25%")
+        #expect(audioDownloadStatusText(.init(songID: "a", receivedBytes: 512, expectedBytes: -1)) == "下载中")
+        #expect(audioDownloadStatusText(.init(songID: "a")) == "下载中")
+    }
 }

@@ -2,13 +2,45 @@ import Foundation
 
 /// Returns the authored media position for a tapped lyric. The optimizer may
 /// advance `line.startTime` for visual anticipation, so seeking must use the
-/// first real timed word. `lyricLeadMs` is intentionally not applied here: it
-/// is a presentation-only lead, matching the Android player's behavior.
+/// first real timed word.
 public func lyricTapSeekTime(line: LyricLine, lyricOffsetMs: Int64) -> Int64 {
     let authoredStart = line.words.first {
         !$0.word.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }?.startTime ?? line.startTime
     return max(0, authoredStart - lyricOffsetMs)
+}
+
+/// The clock used for word-by-word progress. A line-transition lead must never
+/// be added here, otherwise the rendered lyric progress runs ahead of audio.
+public func lyricPresentationTime(mediaPositionMs: Int64, lyricOffsetMs: Int64) -> Int64 {
+    mediaPositionMs + lyricOffsetMs
+}
+
+/// The separate clock used only to anticipate active-line changes and scrolling.
+public func lyricTimelineTime(presentationTimeMs: Int64, lineTransitionLeadMs: Int64) -> Int64 {
+    presentationTimeMs + lineTransitionLeadMs
+}
+
+/// Line opacity depends on playback emphasis, never on the number of timed
+/// words. LRC lyrics often represent an entire visual line as one timed word.
+public func lyricLineOpacity(isHighlighted: Bool) -> Double {
+    isHighlighted ? 0.85 : 1
+}
+
+/// Interlude dots represent a true gap in the complete lyric timeline. A gap
+/// between two adjacent groups is not enough when another overlapping lyric
+/// group is still active.
+public func shouldShowLyricInterlude(
+    previousEndTimeMs: Int64,
+    nextStartTimeMs: Int64,
+    currentTimeMs: Int64,
+    hasActiveLyrics: Bool,
+    minimumGapMs: Int64 = 4_000
+) -> Bool {
+    !hasActiveLyrics
+        && nextStartTimeMs - previousEndTimeMs >= minimumGapMs
+        && currentTimeMs >= previousEndTimeMs
+        && currentTimeMs < nextStartTimeMs
 }
 
 /// Reconstructs a display-rate lyric clock from coarse media-position samples.
@@ -67,13 +99,18 @@ public struct PlaybackTimeInterpolator: Sendable {
         }
 
         let raw = anchorSourceTimeMs + Double(nonnegativeDifference(frameNanoseconds, anchorFrameNanoseconds)) / 1_000_000 * rate
-        let frameDelta = min(Double(nonnegativeDifference(frameNanoseconds, previousFrame)) / 1_000_000, 64)
+        // Advance by the complete elapsed time. Capping this delta made the
+        // lyric clock lose time whenever a large iPad layout missed frames;
+        // audio kept advancing while lyrics only advanced by 64 ms per render.
+        let frameDelta = Double(nonnegativeDifference(frameNanoseconds, previousFrame)) / 1_000_000
         let predicted = visualTimeMs + frameDelta * rate
         let error = raw - predicted
         if abs(error) > 250 {
             visualTimeMs = raw
         } else {
-            let correction = max(0.25, frameDelta * 0.25)
+            // Keep source-sample jitter correction bounded without limiting
+            // the media time advanced by the frame itself.
+            let correction = max(0.25, min(frameDelta, 64) * 0.25)
             visualTimeMs = predicted + min(max(error, -correction), correction)
         }
         lastFrameNanoseconds = frameNanoseconds
