@@ -723,6 +723,7 @@ private struct LyricGroupView: View, Equatable {
             BalancedLyricLayout(
                 trailingAlignment: line.isDuet,
                 spaces: chunks.map(\.isSpace),
+                singleCharacterWords: chunks.map(\.isSingleCJKCharacter),
                 breakOpportunities: chunks.map(\.breakAfter)
             ) {
                 ForEach(chunks) { chunk in

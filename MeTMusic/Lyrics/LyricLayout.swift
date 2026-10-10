@@ -11,6 +11,7 @@ struct LyricWordChunk: Identifiable, Hashable {
     let romanText: String
     let emphasisAmount: CGFloat
     let emphasizes: Bool
+    let isSingleCJKCharacter: Bool
     var breakAfter: LyricBreakOpportunity = .character
     var isSpace: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
@@ -18,6 +19,7 @@ struct LyricWordChunk: Identifiable, Hashable {
         self.id = id
         self.words = words
         text = words.map(\.word).joined()
+        isSingleCJKCharacter = text.count == 1 && isCJK(text)
         displayText = words.map(maskedLyricWord).joined()
         characters = displayText.map(String.init)
         rubyText = words.flatMap(\.ruby).map(\.word).joined()
@@ -179,7 +181,8 @@ func chunkLyricWords(_ words: [LyricWord]) -> [LyricWordChunk] {
 private func isCJK(_ text: String) -> Bool {
     text.unicodeScalars.contains { scalar in
         switch scalar.value {
-        case 0x2E80...0x2FDF, 0x3040...0x30FF, 0x31F0...0x31FF,
+        case 0x1100...0x11FF, 0x2E80...0x2FDF, 0x3040...0x30FF,
+             0x3130...0x318F, 0x31F0...0x31FF, 0xA960...0xA97F, 0xD7B0...0xD7FF,
              0x3400...0x4DBF, 0x4E00...0x9FFF, 0xAC00...0xD7AF,
              0xF900...0xFAFF, 0x20000...0x2FA1F: true
         default: false
@@ -240,6 +243,7 @@ struct BalancedLyricLayout: Layout {
     var trailingAlignment: Bool
     var horizontalSpacing: CGFloat = 0
     var spaces: [Bool] = []
+    var singleCharacterWords: [Bool] = []
     var breakOpportunities: [LyricBreakOpportunity] = []
 
     struct Cache {
@@ -248,6 +252,7 @@ struct BalancedLyricLayout: Layout {
         var width: CGFloat?
         var spacing: CGFloat?
         var spaces: [Bool] = []
+        var singleCharacterWords: [Bool] = []
         var breakOpportunities: [LyricBreakOpportunity] = []
 
         mutating func updateSizes(_ newSizes: [CGSize]) {
@@ -268,11 +273,13 @@ struct BalancedLyricLayout: Layout {
 
     func cachedRows(width: CGFloat, cache: inout Cache) -> [Range<Int>] {
         if cache.width != width || cache.spacing != horizontalSpacing
-            || cache.spaces != spaces || cache.breakOpportunities != breakOpportunities {
+            || cache.spaces != spaces || cache.singleCharacterWords != singleCharacterWords
+            || cache.breakOpportunities != breakOpportunities {
             cache.rows = calculateRows(sizes: cache.sizes, width: width)
             cache.width = width
             cache.spacing = horizontalSpacing
             cache.spaces = spaces
+            cache.singleCharacterWords = singleCharacterWords
             cache.breakOpportunities = breakOpportunities
         }
         return cache.rows
@@ -379,6 +386,70 @@ struct BalancedLyricLayout: Layout {
             let end = visibleEnd(following, start: cursor)
             rows.append(cursor..<end)
             cursor = skipSpaces(following)
+        }
+        return preferNearbySpaces(rows: rows, prefixWidths: prefix, width: width)
+    }
+
+    /// Snap an existing CJK character break to the nearest space within two
+    /// graphemes. Both adjoining rows must still fit; timed chunks stay intact.
+    private func preferNearbySpaces(rows original: [Range<Int>], prefixWidths: [CGFloat], width: CGFloat) -> [Range<Int>] {
+        guard original.count > 1 else { return original }
+        var rows = original
+        func isSingleCharacter(_ index: Int) -> Bool {
+            singleCharacterWords.indices.contains(index) && singleCharacterWords[index]
+        }
+        func rowWidth(_ range: Range<Int>) -> CGFloat {
+            prefixWidths[range.upperBound] - prefixWidths[range.lowerBound]
+                + CGFloat(max(0, range.count - 1)) * horizontalSpacing
+        }
+        for index in 0..<(rows.count - 1) {
+            let left = rows[index]
+            let right = rows[index + 1]
+            // A break already on whitespace needs no adjustment.
+            guard left.upperBound == right.lowerBound,
+                  isSingleCharacter(left.upperBound - 1),
+                  isSingleCharacter(right.lowerBound) else { continue }
+            let boundary = left.upperBound
+            var candidates: [(space: Range<Int>, distance: Int)] = []
+            for direction in [-1, 1] {
+                var cursor = direction < 0 ? boundary - 1 : boundary
+                var distance = 0
+                while cursor >= left.lowerBound && cursor < right.upperBound {
+                    if isSpace(cursor) {
+                        var start = cursor
+                        var end = cursor + 1
+                        while start > left.lowerBound && isSpace(start - 1) { start -= 1 }
+                        while end < right.upperBound && isSpace(end) { end += 1 }
+                        candidates.append((start..<end, distance))
+                        break
+                    }
+                    guard distance < 2, isSingleCharacter(cursor) else { break }
+                    distance += 1
+                    cursor += direction
+                }
+            }
+            var best: (left: Range<Int>, right: Range<Int>, distance: Int, imbalance: CGFloat)?
+            for candidate in candidates {
+                guard candidate.space.lowerBound > left.lowerBound,
+                      candidate.space.upperBound < right.upperBound else { continue }
+                let opportunityIndex = candidate.space.upperBound - 1
+                if breakOpportunities.indices.contains(opportunityIndex),
+                   breakOpportunities[opportunityIndex] == .avoid { continue }
+                let newLeft = left.lowerBound..<candidate.space.lowerBound
+                let newRight = candidate.space.upperBound..<right.upperBound
+                let leftWidth = rowWidth(newLeft)
+                let rightWidth = rowWidth(newRight)
+                guard leftWidth <= width, rightWidth <= width else { continue }
+                let imbalance = abs(leftWidth - rightWidth)
+                if best == nil || candidate.distance < best!.distance
+                    || (candidate.distance == best!.distance && imbalance < best!.imbalance) {
+                    best = (newLeft, newRight, candidate.distance, imbalance)
+                }
+            }
+            if let best {
+                rows[index] = best.left
+                rows[index + 1] = best.right
+            }
         }
         return rows
     }

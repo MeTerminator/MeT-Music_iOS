@@ -508,4 +508,68 @@ import Testing
         }
     }
 
+    @Test @MainActor func singleCharacterLyricsSnapToSpacesWithinTwoCharacters() {
+        // Force the original balanced break to sit two characters from a space.
+        // Zero-width spaces make the expected measured break unambiguous.
+        for (spaceIndex, originalBreak, expected) in [
+            (2, 5, [0..<2, 3..<9]),
+            (6, 4, [0..<6, 7..<9]),
+        ] {
+            let spaces = (0..<9).map { $0 == spaceIndex }
+            var opportunities = Array(repeating: LyricBreakOpportunity.character, count: 9)
+            opportunities[originalBreak - 1] = .phrase
+            opportunities[spaceIndex] = .word
+            var layout = BalancedLyricLayout(
+                trailingAlignment: false, spaces: spaces, breakOpportunities: opportunities
+            )
+            var cache = BalancedLyricLayout.Cache(sizes: spaces.map { .init(width: $0 ? 0 : 10, height: 30) })
+            #expect(layout.cachedRows(width: 60, cache: &cache) == [0..<originalBreak, originalBreak..<9])
+            layout.singleCharacterWords = spaces.map { !$0 }
+            // The new metadata must invalidate the original cached rows.
+            #expect(layout.cachedRows(width: 60, cache: &cache) == expected)
+        }
+    }
+
+    @Test @MainActor func nearbySpaceRuleRejectsDistantSpacesAndOverflow() {
+        for (spaceIndex, width) in [(1, CGFloat(60)), (2, CGFloat(50))] {
+            let spaces = (0..<9).map { $0 == spaceIndex }
+            var opportunities = Array(repeating: LyricBreakOpportunity.character, count: 9)
+            opportunities[4] = .phrase
+            opportunities[spaceIndex] = .word
+            let layout = BalancedLyricLayout(
+                trailingAlignment: true, spaces: spaces,
+                singleCharacterWords: spaces.map { !$0 }, breakOpportunities: opportunities
+            )
+            var cache = BalancedLyricLayout.Cache(sizes: spaces.map { .init(width: $0 ? 0 : 10, height: 30) })
+            // Three characters away, or shifting would make the second row too wide.
+            #expect(layout.cachedRows(width: width, cache: &cache) == [0..<5, 5..<9])
+        }
+    }
+
+    @Test @MainActor func nearbySpaceRuleChoosesTheCloserOfBothSides() {
+        let spaces = (0..<9).map { $0 == 2 || $0 == 6 }
+        var opportunities = Array(repeating: LyricBreakOpportunity.character, count: 9)
+        opportunities[4] = .phrase
+        opportunities[2] = .word
+        opportunities[6] = .word
+        let layout = BalancedLyricLayout(
+            trailingAlignment: false, spaces: spaces,
+            singleCharacterWords: spaces.map { !$0 }, breakOpportunities: opportunities
+        )
+        var cache = BalancedLyricLayout.Cache(sizes: spaces.map { .init(width: $0 ? 0 : 10, height: 30) })
+        // The right space is one character away; the left is two away.
+        #expect(layout.cachedRows(width: 60, cache: &cache) == [0..<6, 7..<9])
+    }
+
+    @Test func nearbySpaceRuleRecognizesCJKGraphemesAndPreservesEnglishWords() {
+        for text in ["汉", "한", "あ", "カ", "한"] {
+            let chunk = LyricWordChunk(id: text, words: [.init(startTime: 0, endTime: 100, word: text)])
+            #expect(chunk.isSingleCJKCharacter)
+        }
+        for text in ["English", "a", "東京", " ", "👨‍👩‍👧‍👦"] {
+            let chunk = LyricWordChunk(id: text, words: [.init(startTime: 0, endTime: 100, word: text)])
+            #expect(!chunk.isSingleCJKCharacter)
+        }
+    }
+
 }
