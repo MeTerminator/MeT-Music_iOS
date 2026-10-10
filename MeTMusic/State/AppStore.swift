@@ -52,6 +52,11 @@ final class AppStore: ObservableObject {
     /// Set while precache mode holds playback back for the current song, so the
     /// player can show download progress in place of the playback progress bar.
     @Published private(set) var precacheDownload: AudioDownloadProgress?
+    @Published private var isResolvingPlayback = false
+
+    var isPlaybackLoading: Bool {
+        isResolvingPlayback || audio.isLoading || precacheDownload != nil
+    }
     @Published var cacheSizes: [CacheStore.Category: Int64] = [:]
     @Published var toast: String?
 
@@ -115,6 +120,9 @@ final class AppStore: ObservableObject {
 
     func logout() {
         together.leaveRoom()
+        playbackGeneration += 1
+        clearStandaloneStreamingSource()
+        precacheDownload = nil
         audio.stop()
         ["qq_id", "nickname", "avatar_url"].forEach(defaults.removeObject)
         isLoggedIn = false; qqID = ""; nickname = "未登录"; avatarURL = ""
@@ -170,6 +178,7 @@ final class AppStore: ObservableObject {
     }
 
     func togglePlayback() {
+        guard !isPlaybackLoading else { return }
         if together.isInRoom { together.sendPlayOrPause(); return }
         audio.isPlaying ? pause() : resume()
     }
@@ -183,6 +192,7 @@ final class AppStore: ObservableObject {
         // The loaded item is still at the pre-seek position while a transaction
         // runs, so playing it now would start audio somewhere the user left.
         if activeSeek != nil { seekResumesPlayback = true; return }
+        guard !isPlaybackLoading else { return }
         if audio.isReady { audio.resume() }
         else if let currentSong { startStandalone(currentSong) }
     }
@@ -409,10 +419,14 @@ final class AppStore: ObservableObject {
         lyrics = []
         ttmlAuthor = nil
         precacheDownload = nil
+        isResolvingPlayback = true
         // Precache mode downloads the complete file before playing, so playback
         // reads a local, fully seekable file instead of the network stream.
         let precaching = precacheEnabled
         Task {
+            defer {
+                if generation == playbackGeneration { isResolvingPlayback = false }
+            }
             do {
                 let remote: URL
                 if let cached = await cache.remoteURL(songID: song.id, quality: soundQuality) { remote = cached }
@@ -437,6 +451,7 @@ final class AppStore: ObservableObject {
                 standaloneStreamingSongID = playbackURL.isFileURL ? nil : song.id
                 standaloneStreamingURL = playbackURL.isFileURL ? nil : remote
                 audio.play(url: playbackURL, startPositionMs: start)
+                isResolvingPlayback = false
                 if let cover = song.bestCoverURL { Task { _ = try? await cache.coverData(remoteURL: cover) } }
                 let ordinary = await loadOrdinaryLyricResult(for: song)
                 apply(ordinary, to: song)
@@ -448,6 +463,7 @@ final class AppStore: ObservableObject {
             } catch {
                 guard generation == playbackGeneration else { return }
                 precacheDownload = nil
+                isResolvingPlayback = false
                 showToast("播放失败：\(error.localizedDescription)")
                 next(auto: true)
             }
@@ -526,6 +542,7 @@ final class AppStore: ObservableObject {
     }
 
     func clearStandaloneStreamingSource() {
+        isResolvingPlayback = false
         accurateSeekGeneration += 1
         requestedSeekTargetMs = nil
         seekResumesPlayback = false

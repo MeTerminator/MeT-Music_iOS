@@ -89,9 +89,29 @@ import Testing
         let loaded = await player.load(url: try makeAudioFile(), autoPlay: true)
         #expect(!loaded)
         #expect(!player.isReady)
+        #expect(!player.isLoading)
         #expect(!player.isPlaying)
         #expect(!player.usesFileEngine)
         #expect(reportedError?.contains("音频会话激活失败") == true)
+    }
+
+    @Test func loadingStaysVisibleUntilActivationAndMediaPreparationFinish() async throws {
+        let gate = AudioSessionActivationGate()
+        let player = AudioPlayer(audioSessionActivation: { await gate.activate() })
+        defer { player.stop() }
+        let url = try makeAudioFile()
+        let pending = Task { await player.load(url: url, autoPlay: false) }
+        await gate.waitUntilEntered()
+        #expect(player.isLoading)
+        #expect(!player.isReady)
+        for _ in 0..<8 { player.toggle(); player.resume() }
+        #expect(player.isLoading)
+        #expect(!player.isPlaying)
+        await gate.release()
+        #expect(await pending.value)
+        #expect(!player.isLoading)
+        #expect(player.isReady)
+        #expect(!player.isPlaying)
     }
 
     @Test func stoppedLoadDoesNotResumeAfterAudioSessionActivation() async throws {
@@ -100,7 +120,9 @@ import Testing
         let url = try makeAudioFile()
         let pending = Task { await player.load(url: url, autoPlay: true) }
         await gate.waitUntilEntered()
+        #expect(player.isLoading)
         player.stop()
+        #expect(!player.isLoading)
         await gate.release()
         let loaded = await pending.value
         #expect(!loaded)

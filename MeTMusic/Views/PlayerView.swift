@@ -35,6 +35,7 @@ struct PlayerView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model = PlayerViewModel()
     @GestureState private var dismissGestureActive = false
+    @GestureState private var pageGestureActive = false
     var onDismiss: (() -> Void)?
     var onDismissDrag: (CGFloat) -> Void
 
@@ -49,11 +50,14 @@ struct PlayerView: View {
 
     private var playerBody: some View {
         GeometryReader { container in
-            if usesSideBySideLayout(container.size) {
-                sideBySidePlayer(in: container.size)
-            } else {
-                portraitPagedPlayer(in: container.size)
+            Group {
+                if usesSideBySideLayout(container.size) {
+                    sideBySidePlayer(in: container.size)
+                } else {
+                    portraitPagedPlayer(in: container.size)
+                }
             }
+            .modifier(LyricsScreenAwake(isEnabled: usesSideBySideLayout(container.size) || model.page == 1))
         }
         .background {
             // The background stays fixed between pages without participating in layout.
@@ -69,6 +73,14 @@ struct PlayerView: View {
                 withAnimation(.interactiveSpring(response: 0.32, dampingFraction: 0.88)) {
                     onDismissDrag(0)
                 }
+            }
+        }
+        .onChange(of: pageGestureActive) { _, active in
+            if !active && model.pageDragOffset != 0 {
+                withAnimation(.interactiveSpring(response: 0.32, dampingFraction: 0.88)) {
+                    model.pageDragOffset = 0
+                }
+                model.endPagingAfterSettle()
             }
         }
         .onChange(of: model.isControlDragging) { _, dragging in
@@ -90,7 +102,7 @@ struct PlayerView: View {
     @ViewBuilder
     private func portraitPagedPlayer(in size: CGSize) -> some View {
         HStack(spacing: 0) {
-            nowPlayingPage(in: size)
+            nowPlayingPage(in: size, controlsEnabled: model.page == 0)
                 .frame(width: size.width, height: size.height)
             lyricsChrome(in: size, allowsPageSwipe: true, compactChrome: false)
                 .frame(width: size.width, height: size.height)
@@ -105,6 +117,7 @@ struct PlayerView: View {
 
     private func pageGesture(pageWidth: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 8)
+            .updating($pageGestureActive) { _, active, _ in active = true }
             .onChanged { value in
                 guard !model.isControlDragging, !model.isDismissing else { return }
                 guard abs(value.translation.width) > abs(value.translation.height) * 1.12 else { return }
@@ -198,7 +211,7 @@ struct PlayerView: View {
         .ignoresSafeArea()
     }
 
-    private func nowPlayingPage(in size: CGSize) -> some View {
+    private func nowPlayingPage(in size: CGSize, controlsEnabled: Bool = true) -> some View {
         let contentWidth = max(0, size.width - 48)
         let artworkSide = playerArtworkSide(in: size)
         return VStack(spacing: 0) {
@@ -213,6 +226,8 @@ struct PlayerView: View {
                 progressSection.padding(.horizontal, 8)
                 Spacer().frame(height: 8)
                 mainPlaybackControls
+                    .allowsHitTesting(controlsEnabled)
+                    .disabled(model.isPaging || model.isDismissing)
             }
             .frame(width: contentWidth)
             Spacer(minLength: 12)
@@ -348,6 +363,8 @@ struct PlayerView: View {
                     .padding(.vertical, 10)
             } else {
                 lyricsPlaybackBar
+                    .allowsHitTesting(model.page == 1)
+                    .disabled(model.isPaging || model.isDismissing)
                     .frame(width: max(0, size.width - 48))
                     .padding(.vertical, 16)
             }
@@ -385,20 +402,25 @@ struct PlayerView: View {
             Spacer(minLength: 8)
 
             HStack(spacing: 16) {
-                Button(action: store.previous) {
+                Button(action: { performPlaybackAction(store.previous) }) {
                     Image(systemName: "backward.end.fill")
                         .font(.system(size: 24))
                         .frame(width: 42, height: 48)
                 }
 
-                Button(action: store.togglePlayback) {
-                    Image(systemName: store.audio.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 24))
-                        .frame(width: 48, height: 48)
-                        .background(.white.opacity(0.1), in: Circle())
+                Button(action: { performPlaybackAction(store.togglePlayback) }) {
+                    PlaybackButtonContent(
+                        isLoading: store.isPlaybackLoading,
+                        isPlaying: store.audio.isPlaying,
+                        fontSize: 24
+                    )
+                    .frame(width: 48, height: 48)
+                    .background(.white.opacity(0.1), in: Circle())
                 }
+                .disabled(store.isPlaybackLoading)
+                .accessibilityLabel(store.isPlaybackLoading ? "加载中" : (store.audio.isPlaying ? "暂停" : "播放"))
 
-                Button(action: { store.next() }) {
+                Button(action: { performPlaybackAction { store.next() } }) {
                     Image(systemName: "forward.end.fill")
                         .font(.system(size: 24))
                         .frame(width: 42, height: 48)
@@ -492,27 +514,31 @@ struct PlayerView: View {
             }
             .accessibilityLabel("播放列表")
             Spacer(minLength: 0)
-            Button(action: store.previous) {
+            Button(action: { performPlaybackAction(store.previous) }) {
                 Image(systemName: "backward.end.fill").font(.system(size: compact ? 22 : 30))
                     .frame(width: compact ? 36 : 48, height: 48)
             }
             .accessibilityLabel("上一首")
             Spacer(minLength: 0)
-            Button(action: store.togglePlayback) {
-                Image(systemName: store.audio.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: compact ? 28 : 40))
-                    .frame(width: compact ? 48 : 72, height: compact ? 48 : 72)
-                    .background(.white.opacity(0.1), in: Circle())
+            Button(action: { performPlaybackAction(store.togglePlayback) }) {
+                PlaybackButtonContent(
+                    isLoading: store.isPlaybackLoading,
+                    isPlaying: store.audio.isPlaying,
+                    fontSize: compact ? 28 : 40
+                )
+                .frame(width: compact ? 48 : 72, height: compact ? 48 : 72)
+                .background(.white.opacity(0.1), in: Circle())
             }
-            .accessibilityLabel(store.audio.isPlaying ? "暂停" : "播放")
+            .disabled(store.isPlaybackLoading)
+            .accessibilityLabel(store.isPlaybackLoading ? "加载中" : (store.audio.isPlaying ? "暂停" : "播放"))
             Spacer(minLength: 0)
-            Button(action: { store.next() }) {
+            Button(action: { performPlaybackAction { store.next() } }) {
                 Image(systemName: "forward.end.fill").font(.system(size: compact ? 22 : 30))
                     .frame(width: compact ? 36 : 48, height: 48)
             }
             .accessibilityLabel("下一首")
             Spacer(minLength: 0)
-            Button(action: store.cyclePlaybackMode) {
+            Button(action: { performPlaybackAction(store.cyclePlaybackMode) }) {
                 Image(systemName: store.playbackMode == .sequence ? "repeat" : store.playbackMode.symbol)
                     .font(.system(size: compact ? 16 : 22))
                     .foregroundStyle(.white.opacity(store.playbackMode == .sequence ? 0.65 : 1))
@@ -524,6 +550,14 @@ struct PlayerView: View {
         .buttonStyle(.plain)
         .foregroundStyle(.white)
         .padding(.vertical, compact ? 4 : 12)
+    }
+
+    private func performPlaybackAction(_ action: () -> Void) {
+        // A simultaneous page drag can end over a button that moved under the
+        // finger. Keep the release (and the settling animation) from activating it.
+        guard !model.isPaging, !model.isDismissing, !model.isControlDragging,
+              !pageGestureActive, !dismissGestureActive else { return }
+        action()
     }
 
     private var lyricStyle: AppleMusicLyricsStyle {
@@ -737,5 +771,33 @@ struct QueueView: View {
             }
         }
         .presentationDetents([.medium, .large])
+    }
+}
+
+/// Own the idle-timer override only while lyrics are visible in the foreground.
+private struct LyricsScreenAwake: ViewModifier {
+    let isEnabled: Bool
+    @Environment(\.scenePhase) private var scenePhase
+    @State private var previousIdleTimerDisabled: Bool?
+
+    func body(content: Content) -> some View {
+        content
+            .onChange(of: isEnabled && scenePhase == .active, initial: true) { _, enabled in
+                updateIdleTimer(enabled: enabled)
+            }
+            .onDisappear { updateIdleTimer(enabled: false) }
+    }
+
+    private func updateIdleTimer(enabled: Bool) {
+        #if os(iOS)
+        if enabled {
+            guard previousIdleTimerDisabled == nil else { return }
+            previousIdleTimerDisabled = UIApplication.shared.isIdleTimerDisabled
+            UIApplication.shared.isIdleTimerDisabled = true
+        } else if let previous = previousIdleTimerDisabled {
+            UIApplication.shared.isIdleTimerDisabled = previous
+            previousIdleTimerDisabled = nil
+        }
+        #endif
     }
 }

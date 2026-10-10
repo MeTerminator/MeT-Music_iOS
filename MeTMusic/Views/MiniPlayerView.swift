@@ -18,11 +18,15 @@ struct MiniPlayerView: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 Button(action: store.togglePlayback) {
-                    Image(systemName: store.audio.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 28))
-                        .frame(width: 44, height: 48)
+                    PlaybackButtonContent(
+                        isLoading: store.isPlaybackLoading,
+                        isPlaying: store.audio.isPlaying,
+                        fontSize: 28
+                    )
+                    .frame(width: 44, height: 48)
                 }
-                .accessibilityLabel(store.audio.isPlaying ? "暂停" : "播放")
+                .disabled(store.isPlaybackLoading)
+                .accessibilityLabel(store.isPlaybackLoading ? "加载中" : (store.audio.isPlaying ? "暂停" : "播放"))
                 Button { showingQueue = true } label: {
                     Image(systemName: "list.bullet")
                         .font(.system(size: 25)).frame(width: 44, height: 48)
@@ -55,5 +59,25 @@ private extension View {
         #else
         background(.ultraThinMaterial.opacity(0.35), in: RoundedRectangle(cornerRadius: 32))
         #endif
+    }
+}
+
+/// Keeps every player surface consistent while a song is being prepared.
+struct PlaybackButtonContent: View {
+    let isLoading: Bool
+    let isPlaying: Bool
+    let fontSize: CGFloat
+
+    var body: some View {
+        Group {
+            if isLoading {
+                ProgressView()
+                    .progressViewStyle(.circular)
+                    .tint(.white)
+            } else {
+                Image(systemName: isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: fontSize))
+            }
+        }
     }
 }

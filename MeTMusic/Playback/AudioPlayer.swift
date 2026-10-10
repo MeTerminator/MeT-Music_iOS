@@ -6,6 +6,7 @@ import Foundation
 final class AudioPlayer: ObservableObject {
     @Published private(set) var isPlaying = false
     @Published private(set) var isReady = false
+    @Published private(set) var isLoading = false
     @Published private(set) var positionMs: Int64 = 0
     @Published private(set) var durationMs: Int64 = 0
     @Published private(set) var playbackDiscontinuityRevision: UInt = 0
@@ -122,6 +123,7 @@ final class AudioPlayer: ObservableObject {
         teardownFileEngine()
         isPlaying = false
         isReady = false
+        isLoading = true
         pendingSeekRevision = nil
         clockIsAuthoritative = false
         suppressPeriodicPositionUpdatesUntil = Date.now.addingTimeInterval(0.15)
@@ -136,6 +138,10 @@ final class AudioPlayer: ObservableObject {
         startPositionMs: Int64,
         request: Int
     ) async -> Bool {
+        defer {
+            // An obsolete load must not clear a newer song's loading state.
+            if request == generation { isLoading = false }
+        }
         guard await configureAudioSession(request: request), request == generation else { return false }
         if url.isFileURL,
            let loaded = loadFileEngine(
@@ -182,6 +188,7 @@ final class AudioPlayer: ObservableObject {
     }
 
     func resume() {
+        guard !isLoading, isReady else { return }
         if let filePlayer {
             filePlayer.play()
             isPlaying = filePlayer.isPlaying
@@ -192,7 +199,10 @@ final class AudioPlayer: ObservableObject {
         isPlaying = true
     }
 
-    func toggle() { isPlaying ? pause() : resume() }
+    func toggle() {
+        guard !isLoading else { return }
+        isPlaying ? pause() : resume()
+    }
     func stop() {
         generation += 1
         playbackDiscontinuityRevision &+= 1
@@ -203,6 +213,7 @@ final class AudioPlayer: ObservableObject {
         pendingSeekRevision = nil
         clockIsAuthoritative = false
         suppressPeriodicPositionUpdatesUntil = .distantPast
+        isLoading = false
         isPlaying = false; isReady = false; positionMs = 0; durationMs = 0
     }
 

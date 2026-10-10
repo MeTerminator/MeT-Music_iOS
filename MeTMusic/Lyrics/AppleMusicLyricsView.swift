@@ -49,6 +49,7 @@ public struct AppleMusicLyricsView: View {
     public let handlesHorizontalSwipe: Bool
     public let onHorizontalSwipe: (LyricsHorizontalSwipeDirection) -> Void
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var model: LyricsViewModel
 
     public init(
@@ -152,25 +153,38 @@ public struct AppleMusicLyricsView: View {
                             ForEach(groups.indices, id: \.self) { index in
                                 let group = groups[index]
                                 let active = snapshot.playingIndices.contains(index)
-                                VStack(alignment: group.main.isDuet ? .trailing : .leading, spacing: style.lineSpacing) {
-                                    if let previous = groups[safe: index - 1],
-                                       shouldShowLyricInterlude(
-                                           previousEndTimeMs: previous.renderBounds.endTime,
-                                           nextStartTimeMs: group.main.startTime,
-                                           currentTimeMs: timelineTime,
-                                           hasActiveLyrics: !snapshot.playingIndices.isEmpty
-                                       ) {
-                                        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !updatesFrames)) { frame in
-                                            let elapsed = updatesFrames ? max(0, frame.date.timeIntervalSince(context.date)) : 0
-                                            InterludeDotsView(
-                                                animation: calculateInterludeDotsAnimation(
-                                                    elapsedMs: timelineTime - previous.renderBounds.endTime + Int64(elapsed * 1_000 * style.playbackRate),
-                                                    durationMs: group.main.startTime - previous.renderBounds.endTime
-                                                ),
-                                                color: style.activeColor,
-                                                trailing: group.main.isDuet
-                                            )
+                                let previous = groups[safe: index - 1]
+                                let showsInterlude = previous.map {
+                                    shouldShowLyricInterlude(
+                                        previousEndTimeMs: $0.renderBounds.endTime,
+                                        nextStartTimeMs: group.main.startTime,
+                                        currentTimeMs: timelineTime,
+                                        hasActiveLyrics: !snapshot.playingIndices.isEmpty
+                                    )
+                                } ?? false
+                                VStack(alignment: group.main.isDuet ? .trailing : .leading, spacing: 0) {
+                                    if let previous,
+                                       group.main.startTime - previous.renderBounds.endTime >= 4_000 {
+                                        // Keep the slot mounted and animate its occupied height.
+                                        // This pushes every following lyric down instead of
+                                        // instantly inserting a full-height row into the stack.
+                                        VerticalLyricRevealLayout(progress: showsInterlude ? 1 : 0, attachedAbove: false) {
+                                            TimelineView(.animation(minimumInterval: nil, paused: !updatesFrames || !showsInterlude)) { frame in
+                                                let elapsed = updatesFrames ? max(0, frame.date.timeIntervalSince(context.date)) : 0
+                                                InterludeDotsView(
+                                                    animation: calculateInterludeDotsAnimation(
+                                                        elapsedMs: timelineTime - previous.renderBounds.endTime + Int64(elapsed * 1_000 * style.playbackRate),
+                                                        durationMs: group.main.startTime - previous.renderBounds.endTime
+                                                    ),
+                                                    color: style.activeColor,
+                                                    trailing: group.main.isDuet
+                                                )
+                                            }
+                                            .padding(.bottom, style.lineSpacing)
+                                            .opacity(showsInterlude ? 1 : 0)
                                         }
+                                        .allowsHitTesting(false)
+                                        .accessibilityHidden(!showsInterlude)
                                     }
                                     LyricGroupView(
                                         group: group,
@@ -198,6 +212,18 @@ public struct AppleMusicLyricsView: View {
                                     )
                                     .equatable()
                                 }
+                                // Animate the whole group, including the lyric's placement.
+                                // On exit, the dots' slot collapses as the next lyric rises
+                                // into it, rather than only animating the indicator itself.
+                                .animation(
+                                    isActive && !isPageTransitioning && !model.isHorizontalSwiping
+                                        && !model.isUserScrolling && !snapshot.isSeeking && !reduceMotion
+                                        ? (showsInterlude
+                                            ? .interpolatingSpring(mass: 0.9, stiffness: 115, damping: 16, initialVelocity: 0)
+                                            : .easeInOut(duration: 0.45))
+                                        : nil,
+                                    value: showsInterlude
+                                )
                                 .id(group.id)
                                 .frame(maxWidth: max(0, geometry.size.width - style.horizontalPadding * (hasDuet ? 4 : 2)) * style.lineWidthFraction,
                                        alignment: group.main.isDuet ? .trailing : .leading)
@@ -627,7 +653,9 @@ private struct LyricGroupView: View, Equatable {
     }
 
     var body: some View {
-        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !animatesWords)) { frame in
+        // Let the display choose its native cadence, including ProMotion.
+        // Only active rows tick at this rate; boundary polling stays coarse.
+        TimelineView(.animation(minimumInterval: nil, paused: !animatesWords)) { frame in
             let elapsed = animatesWords ? max(0, frame.date.timeIntervalSince(sampledAt)) : 0
             let time = animatesWords
                 ? (currentTimeProvider?() ?? currentTimeMs + Int64(elapsed * 1_000 * style.playbackRate))
@@ -693,7 +721,7 @@ private struct LyricGroupView: View, Equatable {
     @ViewBuilder private func background(attachedAbove: Bool, timeMs: Int64) -> some View {
         if let background = group.background {
             let revealed = active || !isPlaying
-            BackgroundLyricRevealLayout(
+            VerticalLyricRevealLayout(
                 progress: revealed ? 1 : 0,
                 attachedAbove: attachedAbove
             ) {
@@ -761,10 +789,9 @@ private struct LyricGroupView: View, Equatable {
     }
 }
 
-/// Animates the occupied layout height while keeping the background lyric
-/// attached to the main line. An upper background reveals from its bottom
-/// edge; a lower background reveals from its top edge.
-private struct BackgroundLyricRevealLayout: Layout {
+/// Animates occupied height so surrounding lyrics move with the reveal.
+/// Content attached above reveals from the bottom; content below from the top.
+private struct VerticalLyricRevealLayout: Layout {
     var progress: CGFloat
     let attachedAbove: Bool
 

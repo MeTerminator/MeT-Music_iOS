@@ -8,6 +8,8 @@ struct RootView: View {
     var body: some View {
         ZStack {
             content
+                .allowsHitTesting(!store.isPlayerPresented)
+                .accessibilityHidden(store.isPlayerPresented)
             if store.isPlayerPresented {
                 PlayerPresentationView(onDismiss: { store.isPlayerPresented = false })
                     .zIndex(10)
