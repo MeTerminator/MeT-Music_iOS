@@ -9,13 +9,11 @@ struct RootView: View {
             content
             if store.isPlayerPresented {
                 PlayerView(onDismiss: { store.isPlayerPresented = false })
-                    // Keep the fade transaction on the overlay. Animating the
-                    // whole ZStack also animates the hidden mini player and can
-                    // make symbol transformers span two presentation screens.
-                    .transition(.opacity.animation(.easeInOut(duration: 0.24)))
+                    .transition(.move(edge: .bottom))
                     .zIndex(10)
             }
         }
+        .animation(.spring(response: 0.38, dampingFraction: 0.9), value: store.isPlayerPresented)
     }
 
     private var content: some View {
@@ -40,49 +38,16 @@ struct RootView: View {
         .animation(.easeInOut(duration: 0.2), value: store.toast)
     }
 
-    @ViewBuilder
     private var tabContent: some View {
-        #if os(iOS)
-        if #available(iOS 26.0, *) {
-            if store.currentSong != nil, !store.isPlayerPresented {
-                tabs.tabViewBottomAccessory {
-                    MiniPlayerView(usesSystemGlass: true)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 4)
-                }
-            } else {
-                tabs
-            }
-        } else {
-            if store.currentSong != nil, !store.isPlayerPresented {
-                tabs.safeAreaInset(edge: .bottom, spacing: 0) {
+        LibraryView()
+            .background(Color(red: 22 / 255, green: 22 / 255, blue: 28 / 255).ignoresSafeArea())
+            .preferredColorScheme(.dark)
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if store.currentSong != nil {
                     MiniPlayerView()
-                        .padding(.horizontal, 10)
-                        .padding(.bottom, 6)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
                 }
-            } else {
-                tabs
             }
-        }
-        #else
-        if store.currentSong != nil, !store.isPlayerPresented {
-            tabs.safeAreaInset(edge: .bottom, spacing: 0) {
-                MiniPlayerView().padding(.horizontal, 10).padding(.bottom, 6)
-            }
-        } else {
-            tabs
-        }
-        #endif
-    }
-
-    private var tabs: some View {
-        TabView {
-            LibraryView()
-                .tabItem { Label("音乐库", systemImage: "music.note.list") }
-            ListenTogetherView()
-                .tabItem { Label("一起听", systemImage: "shareplay") }
-            SettingsView()
-                .tabItem { Label("设置", systemImage: "gearshape") }
-        }
     }
 }

@@ -79,4 +79,54 @@ import Testing
         #expect(await player.load(url: try makeAudioFile(), autoPlay: false, startPositionMs: 500))
         #expect(abs(player.lyricClockPositionMs() - 500) <= 120)
     }
+    @Test func audioSessionFailureStopsLoadingAndReportsTheError() async throws {
+        let player = AudioPlayer(audioSessionActivation: {
+            throw NSError(domain: NSOSStatusErrorDomain, code: -50)
+        })
+        defer { player.stop() }
+        var reportedError: String?
+        player.onPlaybackFailure = { reportedError = $0 }
+        let loaded = await player.load(url: try makeAudioFile(), autoPlay: true)
+        #expect(!loaded)
+        #expect(!player.isReady)
+        #expect(!player.isPlaying)
+        #expect(!player.usesFileEngine)
+        #expect(reportedError?.contains("音频会话激活失败") == true)
+    }
+
+    @Test func stoppedLoadDoesNotResumeAfterAudioSessionActivation() async throws {
+        let gate = AudioSessionActivationGate()
+        let player = AudioPlayer(audioSessionActivation: { await gate.activate() })
+        let url = try makeAudioFile()
+        let pending = Task { await player.load(url: url, autoPlay: true) }
+        await gate.waitUntilEntered()
+        player.stop()
+        await gate.release()
+        let loaded = await pending.value
+        #expect(!loaded)
+        #expect(!player.isPlaying)
+        #expect(!player.isReady)
+    }
+
+}
+
+private actor AudioSessionActivationGate {
+    private var entered = false
+    private var continuation: CheckedContinuation<Void, Never>?
+
+    func activate() async {
+        await withCheckedContinuation { continuation in
+            self.continuation = continuation
+            entered = true
+        }
+    }
+
+    func waitUntilEntered() async {
+        while !entered { await Task.yield() }
+    }
+
+    func release() {
+        continuation?.resume()
+        continuation = nil
+    }
 }

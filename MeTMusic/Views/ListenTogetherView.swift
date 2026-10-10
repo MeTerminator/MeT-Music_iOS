@@ -1,22 +1,32 @@
 import SwiftUI
 
 struct ListenTogetherView: View {
+    var usesNavigationStack = true
     @EnvironmentObject private var app: AppStore
-    var body: some View { ListenTogetherContent(together: app.together).environmentObject(app) }
+    var body: some View { ListenTogetherContent(together: app.together, usesNavigationStack: usesNavigationStack).environmentObject(app) }
 }
 
 private struct ListenTogetherContent: View {
     @EnvironmentObject private var app: AppStore
     @ObservedObject var together: ListenTogetherStore
+    var usesNavigationStack = true
     @StateObject private var form = ListenTogetherFormModel()
 
     var body: some View {
-        NavigationStack {
+        Group {
+            if usesNavigationStack { NavigationStack { togetherContent } }
+            else { togetherContent }
+        }
+    }
+
+    private var togetherContent: some View {
+        Group {
             Group {
                 if together.isInRoom { roomView }
                 else { entryView }
             }
             .navigationTitle("一起听")
+            .musicNavigationBarHidden(false)
             .alert("提示", isPresented: Binding(get: { together.errorMessage != nil }, set: { if !$0 { together.errorMessage = nil } })) {
                 Button("好", role: .cancel) { together.errorMessage = nil }
             } message: { Text(together.errorMessage ?? "") }

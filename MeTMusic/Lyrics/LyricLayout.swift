@@ -224,3 +224,27 @@ struct BalancedLyricLayout: Layout {
         return rows
     }
 }
+
+/// Room for the three-radius shadow, character scale, and emphasis wave.
+/// This is drawing bleed, not spacing between words or lyric rows.
+func lyricEffectBleed(fontSize: CGFloat, characterCount: Int) -> CGFloat {
+    max(0, fontSize) * (0.9 + 0.009 * CGFloat(max(0, characterCount - 1)))
+}
+
+/// Keep the progress head over the original glyph width even though the mask
+/// surface is larger to accommodate glow and upward-moving characters.
+func lyricProgressMaskStops(
+    progress: CGFloat,
+    surfaceWidth: CGFloat,
+    contentInset: CGFloat,
+    fadeWidth: CGFloat
+) -> (opaqueEnd: CGFloat, clearStart: CGFloat) {
+    let surface = max(surfaceWidth, 1)
+    let width = max(1, surface - contentInset * 2)
+    let band = min(width * 0.5, max(0, fadeWidth))
+    let head = contentInset + min(max(progress, 0), 1) * (width + band) - band / 2
+    return (
+        min(max((head - band / 2) / surface, 0), 1),
+        min(max((head + band / 2) / surface, 0), 1)
+    )
+}

@@ -9,43 +9,74 @@ import AppKit
 struct LibraryView: View {
     @EnvironmentObject private var store: AppStore
 
+    private enum Destination: Hashable { case together, settings }
+
     var body: some View {
         NavigationStack {
-            ScrollView {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 18)], spacing: 24) {
-                    ForEach(store.playlists) { playlist in
-                        NavigationLink(value: playlist) {
-                            VStack(alignment: .leading, spacing: 9) {
-                                ArtworkView(url: playlist.bestCoverURL, cornerRadius: 14)
-                                    .aspectRatio(1, contentMode: .fit)
-                                Text(playlist.name).font(.headline).lineLimit(1).foregroundStyle(.primary)
-                                Text("\(playlist.trackCount) 首歌曲").font(.caption).foregroundStyle(.secondary)
+            VStack(spacing: 0) {
+                libraryHeader
+                ScrollView {
+                    LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 16)], spacing: 16) {
+                        ForEach(store.playlists) { playlist in
+                            NavigationLink(value: playlist) {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    ArtworkView(url: playlist.bestCoverURL, cornerRadius: 8)
+                                        .aspectRatio(1, contentMode: .fit)
+                                    Text(playlist.name)
+                                        .font(.system(size: 14, weight: .semibold))
+                                        .lineLimit(1).foregroundStyle(.primary)
+                                    Text("\(playlist.trackCount) 首歌曲")
+                                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                                }
+                                .padding(4)
                             }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
+                    }
+                    .padding(.horizontal, 16)
+                }
+                .refreshable { await store.loadUserPlaylists() }
+                .overlay {
+                    if store.playlists.isEmpty {
+                        if store.loadingPlaylists { ProgressView() }
+                        else { Text("没有找到歌单").foregroundStyle(.secondary) }
                     }
                 }
-                .padding()
             }
-            .refreshable { await store.loadUserPlaylists() }
-            .navigationTitle("音乐库")
-            .toolbar {
-                ToolbarItem(placement: .navigation) {
-                    Button(action: {}) {
-                        ArtworkView(url: RemoteAssetURL.make(store.avatarURL), cornerRadius: 17)
-                            .frame(width: 34, height: 34)
-                            .frame(width: 44, height: 44, alignment: .center)
-                            .contentShape(Circle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("个人资料：\(store.nickname)")
-                }
-                ToolbarItem(placement: .primaryAction) {
-                    if store.loadingPlaylists { ProgressView() }
-                }
-            }
+            .musicNavigationBarHidden(true)
             .navigationDestination(for: Playlist.self) { PlaylistDetailView(playlist: $0) }
+            .navigationDestination(for: Destination.self) { destination in
+                switch destination {
+                case .together: ListenTogetherView(usesNavigationStack: false)
+                case .settings: SettingsView(usesNavigationStack: false)
+                }
+            }
         }
+    }
+
+    private var libraryHeader: some View {
+        HStack(spacing: 12) {
+            ArtworkView(url: RemoteAssetURL.make(store.avatarURL), cornerRadius: 18)
+                .frame(width: 36, height: 36)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("资料库").font(.system(size: 20, weight: .bold))
+                Text(store.nickname).font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+            if store.loadingPlaylists, !store.playlists.isEmpty { ProgressView() }
+            NavigationLink(value: Destination.together) {
+                Image(systemName: "person.2.wave.2").frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("一起听")
+            NavigationLink(value: Destination.settings) {
+                Image(systemName: "gearshape").frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("设置")
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
+        .padding(.horizontal, 16)
+        .frame(height: 64)
     }
 }
 
@@ -96,6 +127,7 @@ struct PlaylistDetailView: View {
         }
         .listStyle(.inset)
         .navigationTitle(playlist.name)
+        .musicNavigationBarHidden(false)
         .task { model.songs = await store.tracks(for: playlist) }
         .refreshable { model.songs = await store.tracks(for: playlist, refresh: true) }
         .overlay { if store.loadingPlaylistIDs.contains(playlist.id) && model.songs.isEmpty { ProgressView().controlSize(.large) } }
@@ -261,5 +293,16 @@ private final class ArtworkModel: ObservableObject {
                   maxPixelSize: maxPixelSize
               ), !Task.isCancelled else { return }
         image = decoded.image
+    }
+}
+
+extension View {
+    @ViewBuilder
+    func musicNavigationBarHidden(_ hidden: Bool) -> some View {
+        #if os(iOS)
+        toolbar(hidden ? .hidden : .visible, for: .navigationBar)
+        #else
+        self
+        #endif
     }
 }

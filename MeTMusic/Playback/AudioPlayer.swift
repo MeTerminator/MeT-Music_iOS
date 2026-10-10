@@ -17,6 +17,8 @@ final class AudioPlayer: ObservableObject {
     }
 
     var onPlaybackComplete: (() -> Void)?
+    var onPlaybackFailure: ((String) -> Void)?
+    private let audioSessionActivation: @Sendable () async throws -> Void
     /// Plays a complete local file. Its position is a plain property: assigning
     /// it moves playback immediately, with no completion to be overtaken and no
     /// item to reload, so a position can never end up somewhere else than the
@@ -61,7 +63,8 @@ final class AudioPlayer: ObservableObject {
         )
     }
 
-    init() {
+    init(audioSessionActivation: (@Sendable () async throws -> Void)? = nil) {
+        self.audioSessionActivation = audioSessionActivation ?? { try await Self.activateAudioSession() }
         observeAudioSession()
         player.automaticallyWaitsToMinimizeStalling = true
         player.actionAtItemEnd = .pause
@@ -133,8 +136,7 @@ final class AudioPlayer: ObservableObject {
         startPositionMs: Int64,
         request: Int
     ) async -> Bool {
-        await configureAudioSession()
-        guard request == generation else { return false }
+        guard await configureAudioSession(request: request), request == generation else { return false }
         if url.isFileURL,
            let loaded = loadFileEngine(
                url: url,
@@ -487,9 +489,12 @@ final class AudioPlayer: ObservableObject {
             let shouldResume = resumesAfterInterruption && options.contains(.shouldResume)
             resumesAfterInterruption = false
             guard shouldResume else { return }
+            let request = generation
             Task { @MainActor [weak self] in
-                await self?.configureAudioSession()
-                self?.resume()
+                guard let self,
+                      await self.configureAudioSession(request: request),
+                      self.generation == request else { return }
+                self.resume()
             }
         @unknown default: return
         }
@@ -504,15 +509,49 @@ final class AudioPlayer: ObservableObject {
     }
     #endif
 
-    private func configureAudioSession() async {
+    private func configureAudioSession(request: Int) async -> Bool {
+        do {
+            try await audioSessionActivation()
+            return true
+        } catch {
+            guard request == generation else { return false }
+            let message = "音频会话激活失败：\(error.localizedDescription)"
+            NSLog("%@", message)
+            onPlaybackFailure?(message)
+            return false
+        }
+    }
+
+    nonisolated private static func activateAudioSession() async throws {
         #if os(iOS)
-        await Task.detached(priority: .userInitiated) {
+        try await Task.detached(priority: .userInitiated) {
             let session = AVAudioSession.sharedInstance()
-            try? session.setCategory(.playback, mode: .default, options: [.allowAirPlay, .allowBluetoothA2DP])
-            try? session.setActive(true)
+            // Playback already supports AirPlay and A2DP. Explicit allowAirPlay
+            // is only valid for playAndRecord and caused parameter errors (-50).
+            if session.category != .playback || session.mode != .default || !session.categoryOptions.isEmpty {
+                try session.setCategory(.playback, mode: .default, options: [])
+            }
+            if #available(iOS 27.0, *) {
+                let activated = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, any Error>) in
+                    session.activate(options: []) { activated, error in
+                        if let error { continuation.resume(throwing: error) }
+                        else { continuation.resume(returning: activated) }
+                    }
+                }
+                guard activated else {
+                    throw NSError(domain: "MeTMusic.AudioSession", code: 1, userInfo: [
+                        NSLocalizedDescriptionKey: "系统未能激活音频输出"
+                    ])
+                }
+            } else {
+                // Older systems only have the synchronous API; keep it off
+                // the main thread and finish activation before creating media.
+                try session.setActive(true)
+            }
         }.value
         #endif
     }
+
 }
 
 /// Bridges AVAudioPlayer's delegate callbacks onto the main actor.

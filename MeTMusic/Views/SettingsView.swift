@@ -1,6 +1,7 @@
 import SwiftUI
 
 struct SettingsView: View {
+    var usesNavigationStack = true
     @EnvironmentObject private var store: AppStore
     @StateObject private var model = SettingsViewModel()
 
@@ -10,7 +11,14 @@ struct SettingsView: View {
     ]
 
     var body: some View {
-        NavigationStack {
+        Group {
+            if usesNavigationStack { NavigationStack { settingsContent } }
+            else { settingsContent }
+        }
+    }
+
+    private var settingsContent: some View {
+        Group {
             Form {
                 Section("账户") {
                     HStack {
@@ -83,6 +91,7 @@ struct SettingsView: View {
                 }
             }
             .navigationTitle("设置")
+            .musicNavigationBarHidden(false)
             .task { await store.refreshCacheSizes() }
             .confirmationDialog("确定退出登录？", isPresented: $model.confirmLogout, titleVisibility: .visible) {
                 Button("退出登录", role: .destructive, action: store.logout)

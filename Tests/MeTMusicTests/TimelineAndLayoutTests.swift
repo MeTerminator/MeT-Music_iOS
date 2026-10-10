@@ -304,4 +304,82 @@ import Testing
         #expect(abs(lyricTimelineInterval(largeScreenOptimizations: false, updatesFrames: true) - 1.0 / 30.0) < 0.0001)
         #expect(lyricTimelineInterval(largeScreenOptimizations: true, updatesFrames: false) == 3_600)
     }
+    @Test func playerDismissalRequiresDistanceOrADownwardFlick() {
+        #expect(playerShouldDismiss(translation: 170, projectedTranslation: 190, height: 800))
+        #expect(playerShouldDismiss(translation: 35, projectedTranslation: 400, height: 800))
+        #expect(!playerShouldDismiss(translation: 20, projectedTranslation: 400, height: 800))
+        #expect(!playerShouldDismiss(translation: 70, projectedTranslation: 90, height: 800))
+        #expect(!playerShouldDismiss(translation: -170, projectedTranslation: -400, height: 800))
+    }
+
+    @Test func emphasisMaskIncludesGlowWithoutChangingWordProgress() {
+        let fontSize: CGFloat = 46
+        let inset = lyricEffectBleed(fontSize: fontSize, characterCount: 7)
+        // Three shadow radii plus the upward movement and scale expansion.
+        #expect(inset > fontSize * (0.75 + 0.06 + 0.06))
+        let width: CGFloat = 160
+        for progress: CGFloat in [0.1, 0.5, 0.9] {
+            let original = lyricProgressMaskStops(
+                progress: progress, surfaceWidth: width, contentInset: 0, fadeWidth: 23
+            )
+            let expanded = lyricProgressMaskStops(
+                progress: progress, surfaceWidth: width + inset * 2, contentInset: inset, fadeWidth: 23
+            )
+            #expect(abs(min(width, max(0, expanded.clearStart * (width + inset * 2) - inset)) - original.clearStart * width) < 0.001)
+            #expect(expanded.opaqueEnd <= expanded.clearStart)
+            #expect(expanded.opaqueEnd >= 0 && expanded.clearStart <= 1)
+        }
+    }
+
+    @Test @MainActor func lyricFollowSchedulesEachNewLineAndDeduplicatesTicks() async {
+        var groups: [LyricGroup] = []
+        for index in 0..<3 {
+            let start = Int64(index) * 1_000
+            let end = start + 1_000
+            let word = LyricWord(startTime: start, endTime: end, word: "歌词")
+            let line = LyricLine(words: [word], startTime: start, endTime: end)
+            groups.append(LyricGroup(main: line))
+        }
+        let model = LyricsViewModel(groups: groups, timeMs: 0)
+        var visited: [Int] = []
+        for time: Int64 in [0, 100, 1_100, 1_200, 2_100] {
+            let index = model.sync(timeMs: time).scrollTargetIndex
+            model.scheduleAutoScroll(index: index) { visited.append(index) }
+            await model.autoScrollTask?.value
+        }
+        #expect(visited == [0, 1, 2])
+    }
+
+    @Test @MainActor func lyricFollowRearmsAfterPageChangesAndManualScrolling() async {
+        let model = LyricsViewModel(groups: [], timeMs: 0)
+        var calls = 0
+        model.scheduleAutoScroll(index: 2) { calls += 1 }
+        await model.autoScrollTask?.value
+        model.beginUserScroll()
+        #expect(model.isUserScrolling)
+        model.layoutDidChange()
+        #expect(!model.isUserScrolling)
+        // Reopening the lyric page must scroll even when the line hasn't changed.
+        model.scheduleAutoScroll(index: 2) { calls += 1 }
+        await model.autoScrollTask?.value
+        #expect(calls == 2)
+        model.cancelTasks()
+        model.scheduleAutoScroll(index: 2) { calls += 1 }
+        await model.autoScrollTask?.value
+        #expect(calls == 3)
+    }
+
+    @Test @MainActor func manualLyricDragCancelsAnAlreadyScheduledScroll() async {
+        let model = LyricsViewModel(groups: [], timeMs: 0)
+        var calls = 0
+        model.scheduleAutoScroll(index: 1) { calls += 1 }
+        let pending = model.autoScrollTask
+        model.beginUserScroll()
+        await pending?.value
+        #expect(calls == 0)
+        model.beginHorizontalSwipe()
+        #expect(!model.isUserScrolling)
+        model.cancelTasks()
+    }
+
 }

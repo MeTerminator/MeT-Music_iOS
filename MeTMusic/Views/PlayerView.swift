@@ -1,13 +1,11 @@
 import SwiftUI
 #if os(iOS)
-import AVFoundation
-import AVKit
 import UIKit
 #endif
 
 func playerArtworkSide(in size: CGSize) -> CGFloat {
     guard size.width > 0, size.height > 0 else { return 0 }
-    return min(min(size.width * 0.8, 320), size.height * 0.48)
+    return min(max(0, size.width - 48) * 0.85, size.height * 0.54)
 }
 
 func playerPageTarget(
@@ -25,6 +23,11 @@ func playerPageTarget(
         return 0
     }
     return min(max(currentPage, 0), 1)
+}
+
+func playerShouldDismiss(translation: CGFloat, projectedTranslation: CGFloat, height: CGFloat) -> Bool {
+    translation > max(100, height * 0.18)
+        || (translation > 24 && projectedTranslation > max(180, height * 0.32))
 }
 
 struct PlayerView: View {
@@ -53,6 +56,7 @@ struct PlayerView: View {
             // The background stays fixed between pages without participating in layout.
             artworkBackground
         }
+        .offset(y: model.dismissDragOffset)
         .preferredColorScheme(.dark)
         .sheet(isPresented: $model.showingQueue) { QueueView() }
         .onChange(of: store.currentSong?.id) { _, _ in
@@ -87,7 +91,7 @@ struct PlayerView: View {
     private func pageGesture(pageWidth: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 8)
             .onChanged { value in
-                guard !model.isControlDragging else { return }
+                guard !model.isControlDragging, !model.isDismissing else { return }
                 guard abs(value.translation.width) > abs(value.translation.height) * 1.12 else { return }
                 model.beginPaging()
                 let raw = value.translation.width
@@ -114,8 +118,14 @@ struct PlayerView: View {
         let leftWidth = floor(size.width * 0.48)
         let rightWidth = max(0, size.width - leftWidth)
         return HStack(spacing: 0) {
-            nowPlayingPage(in: .init(width: leftWidth, height: size.height))
-                .frame(width: leftWidth, height: size.height)
+            Group {
+                if usesLargeScreenLyricOptimizations {
+                    nowPlayingPage(in: .init(width: leftWidth, height: size.height))
+                } else {
+                    landscapeCover(in: .init(width: leftWidth, height: size.height))
+                }
+            }
+            .frame(width: leftWidth, height: size.height)
 
             lyricsChrome(
                 in: .init(width: rightWidth, height: size.height),
@@ -129,27 +139,43 @@ struct PlayerView: View {
     }
 
     private func usesSideBySideLayout(_ size: CGSize) -> Bool {
-        guard size.width > size.height else { return false }
-        #if os(macOS)
-        return true
-        #elseif os(iOS)
-        return UIDevice.current.userInterfaceIdiom == .pad
-        #else
-        return false
-        #endif
+        size.width > size.height
+    }
+
+    private func landscapeCover(in size: CGSize) -> some View {
+        let side = max(0, min(size.width - 32, size.height * 0.85))
+        return VStack(spacing: 0) {
+            playerHandle
+            ZStack {
+                ArtworkView(url: store.currentSong?.bestCoverURL, cornerRadius: 16)
+                if model.showLandscapeControls {
+                    RoundedRectangle(cornerRadius: 16).fill(.black.opacity(0.75))
+                    VStack(spacing: 4) {
+                        songTitleBlock
+                        progressSection
+                        playbackControls(compact: true)
+                    }
+                    .padding(12)
+                }
+            }
+            .frame(width: side, height: side)
+            .contentShape(Rectangle())
+            .onTapGesture { model.showLandscapeControls.toggle() }
+            .accessibilityAction(named: "显示播放控制") { model.showLandscapeControls = true }
+            Spacer(minLength: 0)
+        }
+        .frame(width: size.width, height: size.height)
+        .simultaneousGesture(dismissGesture(height: size.height))
     }
 
     private var artworkBackground: some View {
         ZStack {
-            Color(red: 0.08, green: 0.09, blue: 0.13)
+            Color(red: 0.047, green: 0.047, blue: 0.055)
             ArtworkView(url: store.currentSong?.bestCoverURL, cornerRadius: 0)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .scaleEffect(1.4)
-                .blur(radius: 72, opaque: true)
-                .opacity(0.72)
-            Rectangle().fill(.black.opacity(0.32))
+                .blur(radius: 60, opaque: true)
             LinearGradient(
-                colors: [.black.opacity(0.06), .black.opacity(0.2), .black.opacity(0.5)],
+                colors: [.black.opacity(0.5), .black.opacity(0.75), Color(red: 0.039, green: 0.039, blue: 0.047).opacity(0.95)],
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -158,63 +184,81 @@ struct PlayerView: View {
     }
 
     private func nowPlayingPage(in size: CGSize) -> some View {
-        let contentWidth = max(0, size.width - 56)
+        let contentWidth = max(0, size.width - 48)
         let artworkSide = playerArtworkSide(in: size)
-        return ZStack(alignment: .topLeading) {
+        return VStack(spacing: 0) {
+            playerHandle
+            Spacer(minLength: 8)
+            ArtworkView(url: store.currentSong?.bestCoverURL, cornerRadius: 16)
+                .frame(width: artworkSide, height: artworkSide)
+            Spacer(minLength: 16)
             VStack(spacing: 0) {
-                ZStack {
-                    ArtworkView(url: store.currentSong?.bestCoverURL, cornerRadius: 8)
-                        // Keep a generous 20% visual margin around the artwork.
-                        .frame(width: artworkSide, height: artworkSide)
-                        .shadow(color: .black.opacity(0.36), radius: 22, y: 12)
-                        .scaleEffect(store.audio.isPlaying ? 1 : 0.92)
-                        .animation(
-                            model.page == 0 && !model.isPaging
-                                ? .spring(response: 0.48, dampingFraction: 0.82)
-                                : nil,
-                            value: store.audio.isPlaying
-                        )
-                }
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .layoutPriority(1)
-
-                VStack(spacing: 0) {
-                    songTitleBlock.frame(width: contentWidth)
-                    Spacer().frame(height: 16)
-                    progressSection.frame(width: contentWidth)
-                    Spacer().frame(height: 18)
-                    mainPlaybackControls.frame(width: contentWidth)
-                    Spacer().frame(height: 18)
-                    volumeControl.frame(width: contentWidth)
-                    Spacer().frame(height: 14)
-                    playerPageActions.frame(width: contentWidth)
-                    routeLabel.frame(width: contentWidth).padding(.top, 8)
-                }
+                songTitleBlock
+                Spacer().frame(height: 16)
+                progressSection.padding(.horizontal, 8)
+                Spacer().frame(height: 8)
+                mainPlaybackControls
             }
-            .padding(.horizontal, 28)
-            .padding(.top, 6)
-            .padding(.bottom, 10)
-
-            closeButton
-                .padding(.leading, 18)
-                .safeAreaPadding(.top, 8)
+            .frame(width: contentWidth)
+            Spacer(minLength: 12)
         }
+        .padding(.horizontal, 24)
         .foregroundStyle(.white)
         .frame(width: size.width, height: size.height)
-        .clipped()
+        .contentShape(Rectangle())
+        .simultaneousGesture(dismissGesture(height: size.height))
     }
 
     private var songTitleBlock: some View {
-        HStack {
+        VStack(spacing: 4) {
             if let song = store.currentSong {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(song.name).font(.headline.weight(.bold)).lineLimit(1)
-                    Text(song.artistText).font(.subheadline).foregroundStyle(.white.opacity(0.62)).lineLimit(1)
+                Text(song.name).font(.system(size: 20, weight: .bold)).lineLimit(1)
+                Text(song.artistText).font(.system(size: 15))
+                    .foregroundStyle(.white.opacity(0.7)).lineLimit(1)
+            }
+        }
+        .multilineTextAlignment(.center)
+        .frame(maxWidth: .infinity)
+        .frame(height: 48)
+    }
+
+    private var playerHandle: some View {
+        Button(action: closePlayer) {
+            Capsule().fill(.white.opacity(0.7)).frame(width: 42, height: 5)
+                .frame(maxWidth: .infinity).frame(height: 32)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("关闭播放器")
+    }
+
+    private func dismissGesture(height: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 12)
+            .onChanged { value in
+                guard !model.isControlDragging, !model.isPaging else { return }
+                if !model.isDismissing {
+                    guard value.translation.height > 0,
+                          value.translation.height > abs(value.translation.width) * 1.2 else { return }
+                    model.isDismissing = true
+                }
+                // No implicit animation during tracking: the surface stays under the finger.
+                model.dismissDragOffset = max(0, value.translation.height)
+            }
+            .onEnded { value in
+                guard model.isDismissing else { return }
+                model.isDismissing = false
+                if playerShouldDismiss(
+                    translation: value.translation.height,
+                    projectedTranslation: value.predictedEndTranslation.height,
+                    height: height
+                ) {
+                    closePlayer()
+                } else {
+                    withAnimation(.interactiveSpring(response: 0.32, dampingFraction: 0.88)) {
+                        model.dismissDragOffset = 0
+                    }
                 }
             }
-            Spacer()
-        }
-        .frame(height: 48)
     }
 
     private func lyricsChrome(
@@ -223,11 +267,20 @@ struct PlayerView: View {
         compactChrome: Bool
     ) -> some View {
         return VStack(spacing: 0) {
-            if !compactChrome {
-                lyricsHeader
-                    .frame(width: max(0, size.width - 52))
-                    .padding(.top, 4)
-                    .padding(.bottom, 8)
+            if compactChrome {
+                Text("歌词").font(.system(size: 14, weight: .bold))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 12)
+            } else {
+                VStack(spacing: 0) {
+                    playerHandle
+                    lyricsHeader.padding(.bottom, 16)
+                }
+                .frame(width: max(0, size.width - 48))
+                .contentShape(Rectangle())
+                .simultaneousGesture(dismissGesture(height: size.height))
             }
             AppleMusicLyricsView(
                 lyricLines: store.lyrics,
@@ -267,6 +320,7 @@ struct PlayerView: View {
                     }
                 }
             )
+            .padding(.horizontal, 24)
             .frame(width: size.width)
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
@@ -278,8 +332,8 @@ struct PlayerView: View {
                     .padding(.vertical, 10)
             } else {
                 lyricsPlaybackBar
-                    .frame(width: max(0, size.width - 44))
-                    .padding(.vertical, 10)
+                    .frame(width: max(0, size.width - 48))
+                    .padding(.vertical, 16)
             }
         }
         .frame(width: size.width, height: size.height)
@@ -288,34 +342,19 @@ struct PlayerView: View {
     }
 
     private var lyricsHeader: some View {
-        HStack(spacing: 11) {
-            ArtworkView(url: store.currentSong?.bestCoverURL, cornerRadius: 7).frame(width: 48, height: 48)
+        HStack(spacing: 12) {
+            ArtworkView(url: store.currentSong?.bestCoverURL, cornerRadius: 8)
+                .frame(width: 56, height: 56)
             if let song = store.currentSong {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(song.name).font(.subheadline.weight(.bold)).lineLimit(1)
-                    Text(song.artistText).font(.caption).foregroundStyle(.white.opacity(0.62)).lineLimit(1)
-                    if let author = store.ttmlAuthor {
-                        Text("TTML · \(author)").font(.caption2).foregroundStyle(.white.opacity(0.48)).lineLimit(1)
-                    }
+                    Text(song.name).font(.system(size: 18, weight: .bold)).lineLimit(1)
+                    Text(song.artistText).font(.system(size: 14))
+                        .foregroundStyle(.white.opacity(0.6)).lineLimit(1)
                 }
             }
-            Spacer()
+            Spacer(minLength: 0)
         }
-        .frame(height: 48)
-    }
-
-    private var closeButton: some View {
-        Button(action: closePlayer) {
-            Image(systemName: "xmark")
-                .font(.system(size: 15, weight: .bold))
-                .frame(width: 38, height: 38)
-                .background(.ultraThinMaterial, in: Circle())
-                .overlay {
-                    Circle().stroke(.white.opacity(0.14), lineWidth: 0.5)
-                }
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("关闭播放器")
+        .frame(height: 56)
     }
 
     private var lyricsPlaybackBar: some View {
@@ -329,24 +368,24 @@ struct PlayerView: View {
 
             Spacer(minLength: 8)
 
-            HStack(spacing: 10) {
+            HStack(spacing: 16) {
                 Button(action: store.previous) {
-                    Image(systemName: "backward.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .frame(width: 42, height: 42)
+                    Image(systemName: "backward.end.fill")
+                        .font(.system(size: 24))
+                        .frame(width: 42, height: 48)
                 }
 
                 Button(action: store.togglePlayback) {
                     Image(systemName: store.audio.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 20, weight: .bold))
+                        .font(.system(size: 24))
                         .frame(width: 48, height: 48)
-                        .background(.white.opacity(0.12), in: Circle())
+                        .background(.white.opacity(0.1), in: Circle())
                 }
 
                 Button(action: { store.next() }) {
-                    Image(systemName: "forward.fill")
-                        .font(.system(size: 18, weight: .semibold))
-                        .frame(width: 42, height: 42)
+                    Image(systemName: "forward.end.fill")
+                        .font(.system(size: 24))
+                        .frame(width: 42, height: 48)
                 }
             }
 
@@ -415,10 +454,10 @@ struct PlayerView: View {
                     HStack(spacing: 0) {
                         Text(format(Int64(displayedScrubValue)))
                             .frame(width: geometry.size.width / 2, alignment: .leading)
-                        Text("-" + format(max(0, effectiveDuration - Int64(displayedScrubValue))))
+                        Text(format(effectiveDuration))
                             .frame(width: geometry.size.width / 2, alignment: .trailing)
                     }
-                    .font(.caption2.monospacedDigit())
+                    .font(.system(size: 12).monospacedDigit())
                     .foregroundStyle(.white.opacity(0.5))
                 }
             }
@@ -427,88 +466,58 @@ struct PlayerView: View {
         .frame(height: 38)
     }
 
-    private var mainPlaybackControls: some View {
-        GeometryReader { geometry in
-            HStack(spacing: 0) {
-                Button(action: store.previous) {
-                    Image(systemName: "backward.fill").font(.system(size: 30, weight: .semibold))
-                }
-                .frame(width: geometry.size.width / 3, height: 62)
-                Button(action: store.togglePlayback) {
-                    Image(systemName: store.audio.isPlaying ? "pause.fill" : "play.fill")
-                        .font(.system(size: 42, weight: .semibold))
-                }
-                .frame(width: geometry.size.width / 3, height: 62)
-                Button(action: { store.next() }) {
-                    Image(systemName: "forward.fill").font(.system(size: 30, weight: .semibold))
-                }
-                .frame(width: geometry.size.width / 3, height: 62)
+    private var mainPlaybackControls: some View { playbackControls() }
+
+    private func playbackControls(compact: Bool = false) -> some View {
+        HStack(spacing: 0) {
+            Button { model.showingQueue = true } label: {
+                Image(systemName: "list.bullet").font(.system(size: compact ? 16 : 22))
+                    .frame(width: compact ? 32 : 44, height: 48)
             }
-            .frame(width: geometry.size.width, height: geometry.size.height)
+            .accessibilityLabel("播放列表")
+            Spacer(minLength: 0)
+            Button(action: store.previous) {
+                Image(systemName: "backward.end.fill").font(.system(size: compact ? 22 : 30))
+                    .frame(width: compact ? 36 : 48, height: 48)
+            }
+            .accessibilityLabel("上一首")
+            Spacer(minLength: 0)
+            Button(action: store.togglePlayback) {
+                Image(systemName: store.audio.isPlaying ? "pause.fill" : "play.fill")
+                    .font(.system(size: compact ? 28 : 40))
+                    .frame(width: compact ? 48 : 72, height: compact ? 48 : 72)
+                    .background(.white.opacity(0.1), in: Circle())
+            }
+            .accessibilityLabel(store.audio.isPlaying ? "暂停" : "播放")
+            Spacer(minLength: 0)
+            Button(action: { store.next() }) {
+                Image(systemName: "forward.end.fill").font(.system(size: compact ? 22 : 30))
+                    .frame(width: compact ? 36 : 48, height: 48)
+            }
+            .accessibilityLabel("下一首")
+            Spacer(minLength: 0)
+            Button(action: store.cyclePlaybackMode) {
+                Image(systemName: store.playbackMode == .sequence ? "repeat" : store.playbackMode.symbol)
+                    .font(.system(size: compact ? 16 : 22))
+                    .foregroundStyle(.white.opacity(store.playbackMode == .sequence ? 0.65 : 1))
+                    .frame(width: compact ? 32 : 44, height: 48)
+            }
+            .accessibilityLabel(store.playbackMode.title)
+            .accessibilityHint("切换播放模式")
         }
         .buttonStyle(.plain)
         .foregroundStyle(.white)
-        .frame(height: 62)
-    }
-
-    private var volumeControl: some View {
-        GeometryReader { geometry in
-            HStack(spacing: 9) {
-                Image(systemName: "speaker.fill").font(.caption2).frame(width: 13)
-                PlayerVolumeSlider(
-                    value: Binding(
-                        get: { Double(store.audio.volume) },
-                        set: { store.audio.volume = Float($0) }
-                    ),
-                    onEditingChanged: { editing in
-                        if editing { model.beginControlInteraction() }
-                        else { model.endControlInteraction() }
-                    }
-                )
-                .frame(width: max(0, geometry.size.width - 62))
-                Image(systemName: "speaker.wave.3.fill").font(.caption2).frame(width: 31)
-            }
-            .frame(width: geometry.size.width, height: geometry.size.height)
-        }
-        .foregroundStyle(.white.opacity(0.58))
-        .frame(height: 30)
-    }
-
-    private var playerPageActions: some View {
-        GeometryReader { geometry in
-            HStack(spacing: 0) {
-                #if os(iOS)
-                AirPlayRouteButton().frame(width: geometry.size.width / 2, height: 34)
-                #else
-                Image(systemName: "airplayaudio").frame(width: geometry.size.width / 2, height: 34)
-                #endif
-
-                Button { model.showingQueue = true } label: {
-                    Image(systemName: "list.bullet").font(.system(size: 17, weight: .semibold))
-                }
-                .buttonStyle(.plain)
-                .frame(width: geometry.size.width / 2, height: 34)
-            }
-            .frame(width: geometry.size.width, height: geometry.size.height)
-        }
-        .foregroundStyle(.white.opacity(0.88))
-        .frame(height: 34)
-    }
-
-    private var routeLabel: some View {
-        Text(routeDescription)
-            .font(.caption2.weight(.medium))
-            .foregroundStyle(.secondary)
-            .lineLimit(1)
-            .frame(maxWidth: .infinity)
+        .padding(.vertical, compact ? 4 : 12)
     }
 
     private var lyricStyle: AppleMusicLyricsStyle {
         var style = AppleMusicLyricsStyle()
         style.fontSize = store.lyricFontSize
         style.secondaryFontSize = store.translationFontSize
+        style.lineWidthFraction = 1
+        style.horizontalPadding = 16
         style.alignPosition = 0.2
-        style.lineSpacing = 16
+        style.lineSpacing = 6
         style.wordFadeWidth = 0.5
         style.userScrollResumeDelay = .seconds(5)
         return style
@@ -532,15 +541,6 @@ struct PlayerView: View {
         model.scrubbing ? model.scrubValue : Double(store.audio.positionMs)
     }
 
-    private var routeDescription: String {
-        #if os(iOS)
-        let route = AVAudioSession.sharedInstance().currentRoute.outputs.first?.portName ?? "此 iPhone"
-        return route == "iPhone" ? "此 iPhone" : "iPhone → \(route)"
-        #else
-        return "此 Mac"
-        #endif
-    }
-
     private func closePlayer() {
         if let onDismiss { onDismiss() }
         else { dismiss() }
@@ -548,44 +548,6 @@ struct PlayerView: View {
 
     private func format(_ milliseconds: Int64) -> String {
         String(format: "%lld:%02lld", milliseconds / 60_000, milliseconds / 1_000 % 60)
-    }
-}
-
-private struct PlayerVolumeSlider: View {
-    @Binding var value: Double
-    let onEditingChanged: (Bool) -> Void
-    @State private var editing = false
-
-    var body: some View {
-        GeometryReader { geometry in
-            ZStack(alignment: .leading) {
-                Capsule().fill(.white.opacity(0.26))
-                Capsule()
-                    .fill(.white.opacity(0.82))
-                    .frame(width: geometry.size.width * min(max(value, 0), 1))
-            }
-            .frame(height: 5)
-            .frame(maxHeight: .infinity)
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
-                    .onChanged { gesture in
-                        if !editing {
-                            editing = true
-                            onEditingChanged(true)
-                        }
-                        value = min(max(gesture.location.x / max(geometry.size.width, 1), 0), 1)
-                    }
-                    .onEnded { _ in
-                        editing = false
-                        onEditingChanged(false)
-                    }
-            )
-        }
-        .frame(height: 22)
-        .onDisappear {
-            if editing { onEditingChanged(false) }
-        }
     }
 }
 
@@ -678,10 +640,13 @@ private struct PlayerScrubber: View {
 @MainActor
 private final class PlayerViewModel: ObservableObject {
     @Published var page = 0
+    @Published var showLandscapeControls = false
     @Published var scrubValue = 0.0
     @Published var scrubbing = false
     @Published var showingQueue = false
     @Published var showTranslation = true
+    @Published var dismissDragOffset: CGFloat = 0
+    @Published var isDismissing = false
     @Published var pageDragOffset: CGFloat = 0
     @Published private(set) var isPaging = false
     @Published private(set) var isControlDragging = false
@@ -696,6 +661,8 @@ private final class PlayerViewModel: ObservableObject {
     func beginControlInteraction() {
         pagingSettleTask?.cancel()
         isControlDragging = true
+        isDismissing = false
+        dismissDragOffset = 0
         isPaging = false
         pageDragOffset = 0
     }
@@ -715,20 +682,6 @@ private final class PlayerViewModel: ObservableObject {
 
     deinit { pagingSettleTask?.cancel() }
 }
-
-#if os(iOS)
-private struct AirPlayRouteButton: UIViewRepresentable {
-    func makeUIView(context: Context) -> AVRoutePickerView {
-        let picker = AVRoutePickerView()
-        picker.prioritizesVideoDevices = false
-        picker.tintColor = UIColor.white.withAlphaComponent(0.84)
-        picker.activeTintColor = UIColor.systemPink
-        return picker
-    }
-
-    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
-}
-#endif
 
 struct QueueView: View {
     @EnvironmentObject private var store: AppStore

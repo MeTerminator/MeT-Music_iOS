@@ -27,12 +27,12 @@ import Testing
 
     @Test func playerArtworkStaysInsideItsPage() {
         let portrait = CGSize(width: 402, height: 874)
-        #expect(playerArtworkSide(in: portrait) == 320)
+        #expect(abs(playerArtworkSide(in: portrait) - (portrait.width - 48) * 0.85) < 0.001)
 
         let landscape = CGSize(width: 874, height: 402)
         let landscapeSide = playerArtworkSide(in: landscape)
         #expect(landscapeSide <= landscape.width * 0.8)
-        #expect(landscapeSide <= landscape.height * 0.48)
+        #expect(landscapeSide <= landscape.height * 0.54)
 
         #expect(playerArtworkSide(in: .zero) == 0)
     }

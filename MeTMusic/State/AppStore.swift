@@ -45,7 +45,7 @@ final class AppStore: ObservableObject {
     @Published var lyricOffsetMs: Int64 = 0
     @Published var lyricLeadMs: Int64 = 300
     @Published var lyricFontSize: Double = 32
-    @Published var translationFontSize: Double = 15
+    @Published var translationFontSize: Double = 16
     @Published var removeQRCInformation = true
     @Published var syncThresholdSeconds = 0.3
     @Published var precacheEnabled = false
@@ -496,6 +496,7 @@ final class AppStore: ObservableObject {
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &cancellables)
         audio.onPlaybackComplete = { [weak self] in self?.next(auto: true) }
+        audio.onPlaybackFailure = { [weak self] message in self?.showToast(message) }
         audio.$positionMs
             .combineLatest(audio.$isPlaying, audio.$durationMs)
             .throttle(for: .milliseconds(250), scheduler: RunLoop.main, latest: true)
@@ -538,7 +539,7 @@ final class AppStore: ObservableObject {
         lyricOffsetMs = Int64(defaults.integer(forKey: "lyric_offset"))
         lyricLeadMs = defaults.object(forKey: "lyric_lead") == nil ? 300 : Int64(defaults.integer(forKey: "lyric_lead"))
         lyricFontSize = defaults.object(forKey: "lyric_font_size") == nil ? 32 : defaults.double(forKey: "lyric_font_size")
-        translationFontSize = defaults.object(forKey: "translation_font_size") == nil ? 15 : defaults.double(forKey: "translation_font_size")
+        translationFontSize = defaults.object(forKey: "translation_font_size") == nil ? 16 : defaults.double(forKey: "translation_font_size")
         removeQRCInformation = defaults.object(forKey: "remove_qrc_song_info") == nil ? true : defaults.bool(forKey: "remove_qrc_song_info")
         syncThresholdSeconds = defaults.object(forKey: "sync_threshold") == nil ? 0.3 : defaults.double(forKey: "sync_threshold")
         precacheEnabled = defaults.bool(forKey: "precache_mode")
