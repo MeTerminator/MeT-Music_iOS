@@ -34,10 +34,13 @@ struct PlayerView: View {
     @EnvironmentObject private var store: AppStore
     @Environment(\.dismiss) private var dismiss
     @StateObject private var model = PlayerViewModel()
+    @GestureState private var dismissGestureActive = false
     var onDismiss: (() -> Void)?
+    var onDismissDrag: (CGFloat) -> Void
 
-    init(onDismiss: (() -> Void)? = nil) {
+    init(onDismiss: (() -> Void)? = nil, onDismissDrag: @escaping (CGFloat) -> Void = { _ in }) {
         self.onDismiss = onDismiss
+        self.onDismissDrag = onDismissDrag
     }
 
     var body: some View {
@@ -56,9 +59,21 @@ struct PlayerView: View {
             // The background stays fixed between pages without participating in layout.
             artworkBackground
         }
-        .offset(y: model.dismissDragOffset)
         .preferredColorScheme(.dark)
         .sheet(isPresented: $model.showingQueue) { QueueView() }
+        .onChange(of: dismissGestureActive) { _, active in
+            // Gesture cancellation does not call onEnded (e.g. a system gesture
+            // takes over). Restore the surface instead of leaving it displaced.
+            if !active && model.isDismissing {
+                model.isDismissing = false
+                withAnimation(.interactiveSpring(response: 0.32, dampingFraction: 0.88)) {
+                    onDismissDrag(0)
+                }
+            }
+        }
+        .onChange(of: model.isControlDragging) { _, dragging in
+            if dragging { onDismissDrag(0) }
+        }
         .onChange(of: store.currentSong?.id) { _, _ in
             model.scrubbing = false
             model.scrubValue = 0
@@ -171,7 +186,7 @@ struct PlayerView: View {
     private var artworkBackground: some View {
         ZStack {
             Color(red: 0.047, green: 0.047, blue: 0.055)
-            ArtworkView(url: store.currentSong?.bestCoverURL, cornerRadius: 0)
+            ArtworkView(url: store.currentSong?.bestCoverURL, cornerRadius: 0, maxPixelSize: 160)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .blur(radius: 60, opaque: true)
             LinearGradient(
@@ -234,6 +249,7 @@ struct PlayerView: View {
 
     private func dismissGesture(height: CGFloat) -> some Gesture {
         DragGesture(minimumDistance: 12)
+            .updating($dismissGestureActive) { _, active, _ in active = true }
             .onChanged { value in
                 guard !model.isControlDragging, !model.isPaging else { return }
                 if !model.isDismissing {
@@ -242,7 +258,7 @@ struct PlayerView: View {
                     model.isDismissing = true
                 }
                 // No implicit animation during tracking: the surface stays under the finger.
-                model.dismissDragOffset = max(0, value.translation.height)
+                onDismissDrag(max(0, value.translation.height))
             }
             .onEnded { value in
                 guard model.isDismissing else { return }
@@ -255,7 +271,7 @@ struct PlayerView: View {
                     closePlayer()
                 } else {
                     withAnimation(.interactiveSpring(response: 0.32, dampingFraction: 0.88)) {
-                        model.dismissDragOffset = 0
+                        onDismissDrag(0)
                     }
                 }
             }
@@ -298,7 +314,7 @@ struct PlayerView: View {
                 playbackDiscontinuityRevision: store.audio.playbackDiscontinuityRevision,
                 isPlaying: store.audio.isPlaying,
                 isActive: compactChrome || model.page == 1,
-                isPageTransitioning: model.isPaging,
+                isPageTransitioning: model.isPaging || model.isDismissing,
                 largeScreenOptimizations: usesLargeScreenLyricOptimizations,
                 style: lyricStyle,
                 showTranslation: model.showTranslation,
@@ -645,7 +661,6 @@ private final class PlayerViewModel: ObservableObject {
     @Published var scrubbing = false
     @Published var showingQueue = false
     @Published var showTranslation = true
-    @Published var dismissDragOffset: CGFloat = 0
     @Published var isDismissing = false
     @Published var pageDragOffset: CGFloat = 0
     @Published private(set) var isPaging = false
@@ -662,7 +677,6 @@ private final class PlayerViewModel: ObservableObject {
         pagingSettleTask?.cancel()
         isControlDragging = true
         isDismissing = false
-        dismissDragOffset = 0
         isPaging = false
         pageDragOffset = 0
     }
