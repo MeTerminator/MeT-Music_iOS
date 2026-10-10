@@ -1,3 +1,4 @@
+import NaturalLanguage
 import SwiftUI
 
 struct LyricWordChunk: Identifiable, Hashable {
@@ -10,6 +11,7 @@ struct LyricWordChunk: Identifiable, Hashable {
     let romanText: String
     let emphasisAmount: CGFloat
     let emphasizes: Bool
+    var breakAfter: LyricBreakOpportunity = .character
     var isSpace: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     init(id: String, words: [LyricWord]) {
@@ -103,11 +105,35 @@ func chunkLyricWords(_ words: [LyricWord]) -> [LyricWordChunk] {
         let content = word.word.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !content.isEmpty else { appendAtom(word); continue }
         if !word.ruby.isEmpty {
-            appendAtom(word)
+            // Ruby belongs to the intact word, not its surrounding spaces.
+            let leading = String(word.word.prefix(while: { $0.isWhitespace }))
+            let trailing = String(word.word.reversed().prefix(while: { $0.isWhitespace }).reversed())
+            if !leading.isEmpty {
+                var atom = word
+                atom.word = leading
+                atom.endTime = word.startTime
+                atom.ruby = []
+                atom.romanWord = ""
+                appendAtom(atom)
+            }
+            var atom = word
+            atom.word = content
+            appendAtom(atom)
+            if !trailing.isEmpty {
+                atom.word = trailing
+                atom.startTime = word.endTime
+                atom.endTime = word.endTime
+                atom.ruby = []
+                atom.romanWord = ""
+                appendAtom(atom)
+            }
             continue
         }
         let ns = word.word as NSString
         let matches = wordSplittingExpression.matches(in: word.word, range: NSRange(location: 0, length: ns.length))
+        let parts = matches.map { ns.substring(with: $0.range) }.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let romans = word.romanWord.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        var partIndex = 0
         let nonSpaceLength = max(1, word.word.filter { !$0.isWhitespace }.count)
         let duration = word.endTime - word.startTime
         var offset = 0
@@ -138,12 +164,16 @@ func chunkLyricWords(_ words: [LyricWord]) -> [LyricWordChunk] {
                 atom.word = part
                 atom.startTime = start
                 atom.endTime = word.startTime + Int64(Double(duration) * Double(offset) / Double(nonSpaceLength))
+                atom.romanWord = parts.count == romans.count
+                    ? romans[partIndex]
+                    : (partIndex == 0 ? word.romanWord : "")
+                partIndex += 1
                 appendAtom(atom)
             }
         }
     }
     flush()
-    return result
+    return annotateLyricBreaks(result)
 }
 
 private func isCJK(_ text: String) -> Bool {
@@ -157,17 +187,68 @@ private func isCJK(_ text: String) -> Bool {
     }
 }
 
-/// Balanced dynamic-programming line breaking. Each subview is an indivisible
-/// timed-word chunk, so a single English word can never split across rows.
+/// Prepared once with the chunks; playback frames only reuse these boundaries.
+enum LyricBreakOpportunity: Hashable {
+    case phrase, word, character, avoid
+
+    func penalty(width: CGFloat) -> CGFloat {
+        let ratio: CGFloat = switch self {
+        case .phrase: 0
+        case .word: 0.04
+        case .character: 0.20
+        case .avoid: 4
+        }
+        return width * width * ratio
+    }
+}
+
+private func annotateLyricBreaks(_ source: [LyricWordChunk]) -> [LyricWordChunk] {
+    var chunks = source
+    let text = chunks.map(\.text).joined()
+    let tokenizer = NLTokenizer(unit: .word)
+    tokenizer.string = text
+    var boundaries: Set<Int> = []
+    tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { range, _ in
+        boundaries.insert(range.upperBound.utf16Offset(in: text))
+        return true
+    }
+    let opening = CharacterSet(charactersIn: "（【《「『‘“([{<")
+    let closing = CharacterSet(charactersIn: "，。；：！？、）】》」』’”),.;:!?]}>…")
+    var offset = 0
+    var previous = ""
+    for index in chunks.indices {
+        offset += chunks[index].text.utf16.count
+        if !chunks[index].isSpace {
+            previous = chunks[index].text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let next = chunks.dropFirst(index + 1).first(where: { !$0.isSpace })?.text ?? ""
+        if previous.unicodeScalars.last.map(opening.contains) == true
+            || next.unicodeScalars.first.map(closing.contains) == true {
+            chunks[index].breakAfter = .avoid
+        } else if previous.unicodeScalars.last.map(closing.contains) == true {
+            chunks[index].breakAfter = .phrase
+        } else if chunks[index].isSpace || boundaries.contains(offset) {
+            chunks[index].breakAfter = .word
+        }
+    }
+    return chunks
+}
+
+/// First minimize row count, then balance widths with linguistic break costs.
+/// English syllables and ruby words remain indivisible timed chunks.
 struct BalancedLyricLayout: Layout {
     var trailingAlignment: Bool
     var horizontalSpacing: CGFloat = 0
+    var spaces: [Bool] = []
+    var breakOpportunities: [LyricBreakOpportunity] = []
 
     struct Cache {
         var sizes: [CGSize] = []
         var rows: [Range<Int>] = []
         var width: CGFloat?
         var spacing: CGFloat?
+        var spaces: [Bool] = []
+        var breakOpportunities: [LyricBreakOpportunity] = []
 
         mutating func updateSizes(_ newSizes: [CGSize]) {
             guard sizes != newSizes else { return }
@@ -186,10 +267,13 @@ struct BalancedLyricLayout: Layout {
     }
 
     func cachedRows(width: CGFloat, cache: inout Cache) -> [Range<Int>] {
-        if cache.width != width || cache.spacing != horizontalSpacing {
+        if cache.width != width || cache.spacing != horizontalSpacing
+            || cache.spaces != spaces || cache.breakOpportunities != breakOpportunities {
             cache.rows = calculateRows(sizes: cache.sizes, width: width)
             cache.width = width
             cache.spacing = horizontalSpacing
+            cache.spaces = spaces
+            cache.breakOpportunities = breakOpportunities
         }
         return cache.rows
     }
@@ -205,7 +289,14 @@ struct BalancedLyricLayout: Layout {
         if cache.sizes.count != subviews.count { updateCache(&cache, subviews: subviews) }
         let rows = cachedRows(width: bounds.width, cache: &cache)
         var y = bounds.minY
+        var cursor = 0
         for range in rows {
+            // Only discarded boundary spaces are placed at zero size;
+            // internal spaces keep their normal width within the row.
+            for index in cursor..<range.lowerBound {
+                subviews[index].place(at: bounds.origin, proposal: .zero)
+            }
+            cursor = range.upperBound
             let height = rowHeight(range, cache.sizes)
             let rowWidth = range.reduce(0) { $0 + cache.sizes[$1].width } + CGFloat(max(0, range.count - 1)) * horizontalSpacing
             var x = trailingAlignment ? bounds.maxX - rowWidth : bounds.minX
@@ -216,39 +307,78 @@ struct BalancedLyricLayout: Layout {
             }
             y += height
         }
+        for index in cursor..<subviews.count {
+            subviews[index].place(at: bounds.origin, proposal: .zero)
+        }
     }
 
     private func rowHeight(_ range: Range<Int>, _ sizes: [CGSize]) -> CGFloat {
         range.reduce(CGFloat.zero) { max($0, sizes[$1].height) }
     }
 
-    private func calculateRows(sizes: [CGSize], width: CGFloat) -> [Range<Int>] {
+    private func isSpace(_ index: Int) -> Bool {
+        spaces.indices.contains(index) && spaces[index]
+    }
+
+    private func calculateRows(sizes: [CGSize], width proposedWidth: CGFloat) -> [Range<Int>] {
         guard !sizes.isEmpty else { return [] }
         let count = sizes.count
+        let width = proposedWidth.isFinite ? max(1, proposedWidth) : sizes.reduce(0) { $0 + $1.width }
         var prefix = Array(repeating: CGFloat.zero, count: count + 1)
         for index in sizes.indices { prefix[index + 1] = prefix[index] + sizes[index].width }
-        if prefix[count] + CGFloat(max(0, count - 1)) * horizontalSpacing <= width { return [0..<count] }
+        func skipSpaces(_ start: Int) -> Int {
+            var index = start
+            while index < count && isSpace(index) { index += 1 }
+            return index
+        }
+        func visibleEnd(_ end: Int, start: Int) -> Int {
+            var index = end
+            while index > start && isSpace(index - 1) { index -= 1 }
+            return index
+        }
+        let first = skipSpaces(0)
+        let last = visibleEnd(count, start: first)
+        guard first < last else { return [] }
+        let fullWidth = prefix[last] - prefix[first] + CGFloat(last - first - 1) * horizontalSpacing
+        if fullWidth <= width { return [first..<last] }
         var costs = Array(repeating: CGFloat.infinity, count: count + 1)
-        var next = Array(repeating: -1, count: count + 1)
+        var rowCounts = Array(repeating: Int.max, count: count + 1)
+        var next = Array(repeating: count, count: count + 1)
         costs[count] = 0
+        rowCounts[count] = 0
         for start in stride(from: count - 1, through: 0, by: -1) {
+            if isSpace(start) {
+                costs[start] = costs[start + 1]
+                rowCounts[start] = rowCounts[start + 1]
+                next[start] = next[start + 1]
+                continue
+            }
             for end in (start + 1)...count {
-                let lineWidth = prefix[end] - prefix[start] + CGFloat(max(0, end - start - 1)) * horizontalSpacing
+                if isSpace(end - 1) { continue }
+                let lineWidth = prefix[end] - prefix[start] + CGFloat(end - start - 1) * horizontalSpacing
                 if lineWidth > width && end > start + 1 { break }
+                let following = skipSpaces(end)
                 let overflow = max(0, lineWidth - width)
                 let slack = max(0, width - lineWidth)
-                let lineCost = overflow > 0 ? overflow * overflow * 1_000 : slack * slack
-                let lastLinePenalty: CGFloat = end == count ? 0 : width * width * 0.08
-                let total = lineCost + lastLinePenalty + costs[end]
-                if total < costs[start] { costs[start] = total; next[start] = end }
+                let boundary = following > end ? following - 1 : end - 1
+                let opportunity = breakOpportunities.indices.contains(boundary) ? breakOpportunities[boundary] : .character
+                let penalty = following == count ? 0 : opportunity.penalty(width: width)
+                let cost = slack * slack + overflow * overflow * 1_000 + penalty + costs[following]
+                let rows = 1 + rowCounts[following]
+                if rows < rowCounts[start] || (rows == rowCounts[start] && cost < costs[start]) {
+                    rowCounts[start] = rows
+                    costs[start] = cost
+                    next[start] = following
+                }
             }
         }
         var rows: [Range<Int>] = []
-        var cursor = 0
+        var cursor = skipSpaces(0)
         while cursor < count {
-            let end = next[cursor] > cursor ? next[cursor] : cursor + 1
+            let following = max(cursor + 1, next[cursor])
+            let end = visibleEnd(following, start: cursor)
             rows.append(cursor..<end)
-            cursor = end
+            cursor = skipSpaces(following)
         }
         return rows
     }

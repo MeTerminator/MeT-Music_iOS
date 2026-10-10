@@ -408,4 +408,104 @@ import Testing
         #expect(chunk.characters.joined() == chunk.displayText)
     }
 
+    @Test @MainActor func longLyricsPreferPhraseAndWordBoundaries() {
+        let sizes = Array(repeating: CGSize(width: 10, height: 30), count: 6)
+        var layout = BalancedLyricLayout(
+            trailingAlignment: false,
+            breakOpportunities: [.character, .word, .character, .word, .character, .word]
+        )
+        var cache = BalancedLyricLayout.Cache(sizes: sizes)
+        // Slightly unequal rows preserve words instead of cutting their middle.
+        #expect(layout.cachedRows(width: 40, cache: &cache) == [0..<2, 2..<6])
+        layout.breakOpportunities[2] = .phrase
+        // Changed break metadata invalidates the cache even at the same width.
+        #expect(layout.cachedRows(width: 40, cache: &cache) == [0..<3, 3..<6])
+        layout.breakOpportunities = Array(repeating: .phrase, count: 6)
+        #expect(layout.cachedRows(width: 30, cache: &cache).count == 2)
+    }
+
+    @Test @MainActor func lyricWrappingAvoidsHangingPunctuation() {
+        let sizes = Array(repeating: CGSize(width: 10, height: 30), count: 6)
+        let layout = BalancedLyricLayout(
+            trailingAlignment: true,
+            breakOpportunities: [.character, .word, .avoid, .word, .character, .word]
+        )
+        var cache = BalancedLyricLayout.Cache(sizes: sizes)
+        #expect(layout.cachedRows(width: 40, cache: &cache) == [0..<2, 2..<6])
+        let chunks = chunkLyricWords([.init(startTime: 0, endTime: 5_000, word: "你好，世界")])
+        #expect(chunks[1].breakAfter == .avoid)
+        #expect(chunks[2].breakAfter == .phrase)
+    }
+
+    @Test @MainActor func lyricRowsTrimOnlyBoundaryWhitespace() {
+        let layout = BalancedLyricLayout(
+            trailingAlignment: true,
+            spaces: [true, false, true, false, true, false, true]
+        )
+        let sizes = [8, 25, 8, 25, 8, 25, 8].map { CGSize(width: $0, height: 30) }
+        var cache = BalancedLyricLayout.Cache(sizes: sizes)
+        #expect(layout.cachedRows(width: 100, cache: &cache) == [1..<6])
+        let rows = layout.cachedRows(width: 60, cache: &cache)
+        #expect(rows.count == 2)
+        #expect(rows.flatMap { $0 }.filter { !layout.spaces[$0] } == [1, 3, 5])
+        for row in rows {
+            #expect(!layout.spaces[row.lowerBound])
+            #expect(!layout.spaces[row.upperBound - 1])
+            #expect(row.reduce(CGFloat.zero) { $0 + sizes[$1].width } <= 60)
+        }
+    }
+
+    @Test @MainActor func indivisibleOversizedWordAndEmptyLyricsTerminate() {
+        let layout = BalancedLyricLayout(trailingAlignment: false)
+        var cache = BalancedLyricLayout.Cache(sizes: [.init(width: 200, height: 30), .init(width: 20, height: 30)])
+        #expect(layout.cachedRows(width: 50, cache: &cache) == [0..<1, 1..<2])
+        #expect(layout.cachedRows(width: 0, cache: &cache) == [0..<1, 1..<2])
+        cache.updateSizes([])
+        #expect(layout.cachedRows(width: 50, cache: &cache).isEmpty)
+        let whitespace = BalancedLyricLayout(trailingAlignment: false, spaces: [true, true])
+        cache.updateSizes([.init(width: 10, height: 30), .init(width: 10, height: 30)])
+        #expect(whitespace.cachedRows(width: 50, cache: &cache).isEmpty)
+    }
+
+    @Test func rubySpacesKeepTheWordAndTimingIntact() {
+        let ruby = [LyricWordBase(startTime: 100, endTime: 900, word: "とうきょう")]
+        let chunks = chunkLyricWords([
+            .init(startTime: 100, endTime: 900, word: " 東京 ", romanWord: "Tokyo", ruby: ruby)
+        ])
+        #expect(chunks.map(\.text) == [" ", "東京", " "])
+        #expect(chunks[1].words[0].ruby == ruby)
+        #expect(chunks[1].romanText == "Tokyo")
+        #expect(chunks[1].words[0].startTime == 100)
+        #expect(chunks[1].words[0].endTime == 900)
+        #expect(chunks[0].words[0].endTime == 100)
+        #expect(chunks[2].words[0].startTime == 900)
+        #expect(chunks[0].rubyText.isEmpty && chunks[2].romanText.isEmpty)
+    }
+
+    @Test func romanizationIsAssignedToItsOwnPhrase() {
+        let chunks = chunkLyricWords([
+            .init(startTime: 0, endTime: 1_000, word: "你好 世界", romanWord: "nihao shijie")
+        ])
+        #expect(chunks.map(\.text) == ["你好", " ", "世界"])
+        #expect(chunks.map(\.romanText) == ["nihao", "", "shijie"])
+        #expect(chunks[0].words[0].endTime == 500)
+        #expect(chunks[2].words[0].startTime == 500)
+        #expect(chunks[2].words[0].endTime == 1_000)
+        let unmatched = chunkLyricWords([
+            .init(startTime: 0, endTime: 1_000, word: "你好 世界", romanWord: "ni hao shi jie")
+        ])
+        #expect(unmatched.map(\.romanText) == ["ni hao shi jie", "", ""])
+    }
+
+    @Test func wrappedCJKChunksPreserveTextAndContinuousTime() {
+        let text = "这是一句很长的歌词，需要分段换行👨‍👩‍👧‍👦"
+        let chunks = chunkLyricWords([.init(startTime: 100, endTime: 5_100, word: text)])
+        #expect(chunks.map(\.text).joined() == text)
+        #expect(chunks.first?.words.first?.startTime == 100)
+        #expect(chunks.last?.words.last?.endTime == 5_100)
+        for pair in zip(chunks, chunks.dropFirst()) {
+            #expect(pair.0.words.last?.endTime == pair.1.words.first?.startTime)
+        }
+    }
+
 }

@@ -720,7 +720,11 @@ private struct LyricGroupView: View, Equatable {
         let hasRuby = chunks.contains { !$0.rubyText.isEmpty }
         let hasRoman = chunks.contains { !$0.romanText.isEmpty }
         return VStack(alignment: line.isDuet ? .trailing : .leading, spacing: 0) {
-            BalancedLyricLayout(trailingAlignment: line.isDuet) {
+            BalancedLyricLayout(
+                trailingAlignment: line.isDuet,
+                spaces: chunks.map(\.isSpace),
+                breakOpportunities: chunks.map(\.breakAfter)
+            ) {
                 ForEach(chunks) { chunk in
                     TimedChunkView(
                         chunk: chunk, progress: active ? lyricChunkProgress(words: chunk.words, timeMs: timeMs) : 0,
