@@ -1,7 +1,7 @@
 import Combine
 import SwiftUI
 
-public struct AppleMusicLyricsStyle {
+public struct AppleMusicLyricsStyle: Sendable {
     public var activeColor: Color = .white
     public var inactiveColor: Color = .white.opacity(0.2)
     public var fontSize: CGFloat = 32
@@ -160,18 +160,23 @@ public struct AppleMusicLyricsView: View {
                                            currentTimeMs: timelineTime,
                                            hasActiveLyrics: !snapshot.playingIndices.isEmpty
                                        ) {
-                                        InterludeDotsView(
-                                            animation: calculateInterludeDotsAnimation(
-                                                elapsedMs: timelineTime - previous.renderBounds.endTime,
-                                                durationMs: group.main.startTime - previous.renderBounds.endTime
-                                            ),
-                                            color: style.activeColor,
-                                            trailing: group.main.isDuet
-                                        )
+                                        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !updatesFrames)) { frame in
+                                            let elapsed = updatesFrames ? max(0, frame.date.timeIntervalSince(context.date)) : 0
+                                            InterludeDotsView(
+                                                animation: calculateInterludeDotsAnimation(
+                                                    elapsedMs: timelineTime - previous.renderBounds.endTime + Int64(elapsed * 1_000 * style.playbackRate),
+                                                    durationMs: group.main.startTime - previous.renderBounds.endTime
+                                                ),
+                                                color: style.activeColor,
+                                                trailing: group.main.isDuet
+                                            )
+                                        }
                                     }
                                     LyricGroupView(
                                         group: group,
                                         currentTimeMs: active ? time : 0,
+                                        sampledAt: context.date,
+                                        currentTimeProvider: currentTimeProvider,
                                         active: active,
                                         highlighted: snapshot.highlightedIndices.contains(index),
                                         isPlaying: isPlaying && isActive
@@ -393,7 +398,9 @@ func lyricTimelineInterval(
     updatesFrames: Bool
 ) -> TimeInterval {
     guard updatesFrames else { return 3_600 }
-    return largeScreenOptimizations ? 1.0 / 24.0 : 1.0 / 30.0
+    // This clock only checks line boundaries and requests scrolling. Active
+    // rows own a display-linked clock; the entire list must not run at 60 Hz.
+    return 1.0 / 10.0
 }
 
 struct LyricSourceSignature: Equatable {
@@ -571,6 +578,11 @@ final class LyricsViewModel: ObservableObject {
 private struct LyricRenderStyleSignature: Equatable, Sendable {
     let fontSize: CGFloat
     let secondaryFontSize: CGFloat
+    let activeColor: Color
+    let inactiveColor: Color
+    let wordFadeWidth: CGFloat
+    let enableFrameInterpolation: Bool
+    let playbackRate: Double
     let enableBlur: Bool
     let enableScale: Bool
     let backgroundLineScale: CGFloat
@@ -579,6 +591,11 @@ private struct LyricRenderStyleSignature: Equatable, Sendable {
     @MainActor init(_ style: AppleMusicLyricsStyle) {
         fontSize = style.fontSize
         secondaryFontSize = style.secondaryFontSize
+        activeColor = style.activeColor
+        inactiveColor = style.inactiveColor
+        wordFadeWidth = style.wordFadeWidth
+        enableFrameInterpolation = style.enableFrameInterpolation
+        playbackRate = style.playbackRate
         enableBlur = style.enableBlur
         enableScale = style.enableScale
         backgroundLineScale = style.backgroundLineScale
@@ -589,6 +606,8 @@ private struct LyricRenderStyleSignature: Equatable, Sendable {
 private struct LyricGroupView: View, Equatable {
     let group: LyricGroup
     let currentTimeMs: Int64
+    let sampledAt: Date
+    let currentTimeProvider: (@MainActor () -> Int64)?
     let active: Bool
     let highlighted: Bool
     let isPlaying: Bool
@@ -603,22 +622,37 @@ private struct LyricGroupView: View, Equatable {
     let showRomanization: Bool
     let onTap: () -> Void
 
+    private var animatesWords: Bool {
+        active && isPlaying && !reduceEffects && style.enableFrameInterpolation
+    }
+
     var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 60.0, paused: !animatesWords)) { frame in
+            let elapsed = animatesWords ? max(0, frame.date.timeIntervalSince(sampledAt)) : 0
+            let time = animatesWords
+                ? (currentTimeProvider?() ?? currentTimeMs + Int64(elapsed * 1_000 * style.playbackRate))
+                : currentTimeMs
+            groupContent(timeMs: time)
+        }
+    }
+
+    private func groupContent(timeMs: Int64) -> some View {
+        let targetScale: CGFloat = style.enableScale && !disableTransforms && !reduceEffects && !highlighted && isPlaying ? 0.97 : 1
         let backgroundFirst = !style.alwaysPostpositionBackground
             && (group.background?.words.first?.startTime ?? .max) < (group.main.words.first?.startTime ?? group.main.startTime)
-        VStack(
+        return VStack(
             alignment: group.main.isDuet ? .trailing : .leading,
             spacing: style.fontSize * 0.3
         ) {
-            if backgroundFirst { background(attachedAbove: true) }
-            line(group.main, chunks: group.mainChunks, scale: 1)
-            if !backgroundFirst { background(attachedAbove: false) }
+            if backgroundFirst { background(attachedAbove: true, timeMs: timeMs) }
+            line(group.main, chunks: group.mainChunks, scale: 1, timeMs: timeMs)
+            if !backgroundFirst { background(attachedAbove: false, timeMs: timeMs) }
         }
         .padding(.vertical, style.fontSize * 0.4)
         .foregroundStyle(highlighted ? style.activeColor : style.inactiveColor)
         .opacity(lyricLineOpacity(isHighlighted: highlighted))
-        .scaleEffect(style.enableScale && !disableTransforms && !reduceEffects && !highlighted && isPlaying ? 0.97 : 1,
-                     anchor: group.main.isDuet ? .trailing : .leading)
+        .scaleEffect(targetScale, anchor: group.main.isDuet ? .trailing : .leading)
+        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: targetScale)
         .blur(radius: style.enableBlur && !disableBlur && !reduceEffects && !isUserScrolling && !highlighted ? blurRadius : 0)
         .animation(.easeInOut(duration: 0.4), value: highlighted)
         .animation(.easeInOut(duration: 0.4), value: blurRadius)
@@ -656,14 +690,14 @@ private struct LyricGroupView: View, Equatable {
             && lhs.showRomanization == rhs.showRomanization
     }
 
-    @ViewBuilder private func background(attachedAbove: Bool) -> some View {
+    @ViewBuilder private func background(attachedAbove: Bool, timeMs: Int64) -> some View {
         if let background = group.background {
             let revealed = active || !isPlaying
             BackgroundLyricRevealLayout(
                 progress: revealed ? 1 : 0,
                 attachedAbove: attachedAbove
             ) {
-                line(background, chunks: group.backgroundChunks, scale: style.backgroundLineScale)
+                line(background, chunks: group.backgroundChunks, scale: style.backgroundLineScale, timeMs: timeMs)
                     .opacity(revealed ? 0.4 : 0)
                     .scaleEffect(
                         x: disableTransforms || revealed ? 1 : 0.9,
@@ -682,17 +716,19 @@ private struct LyricGroupView: View, Equatable {
         }
     }
 
-    private func line(_ line: LyricLine, chunks: [LyricWordChunk], scale: CGFloat) -> some View {
-        VStack(alignment: line.isDuet ? .trailing : .leading, spacing: 0) {
+    private func line(_ line: LyricLine, chunks: [LyricWordChunk], scale: CGFloat, timeMs: Int64) -> some View {
+        let hasRuby = chunks.contains { !$0.rubyText.isEmpty }
+        let hasRoman = chunks.contains { !$0.romanText.isEmpty }
+        return VStack(alignment: line.isDuet ? .trailing : .leading, spacing: 0) {
             BalancedLyricLayout(trailingAlignment: line.isDuet) {
                 ForEach(chunks) { chunk in
                     TimedChunkView(
-                        chunk: chunk, currentTimeMs: currentTimeMs, active: active,
-                        style: scaledStyle(scale),
-                        hasRubyLine: chunks.contains { !$0.rubyText.isEmpty },
-                        hasRomanLine: chunks.contains { !$0.romanText.isEmpty }
+                        chunk: chunk, progress: active ? lyricChunkProgress(words: chunk.words, timeMs: timeMs) : 0,
+                        active: active, style: scaledStyle(scale),
+                        hasRubyLine: hasRuby, hasRomanLine: hasRoman
                     )
-                        .fixedSize()
+                    .equatable()
+                    .fixedSize()
                 }
             }
             if showTranslation, !line.translatedLyric.isEmpty {
@@ -762,42 +798,33 @@ private struct BackgroundLyricRevealLayout: Layout {
     }
 }
 
-private struct TimedChunkView: View {
+private struct TimedChunkView: View, Equatable {
     let chunk: LyricWordChunk
-    let currentTimeMs: Int64
+    let progress: CGFloat
     let active: Bool
     let style: AppleMusicLyricsStyle
 
     var hasRubyLine: Bool
     var hasRomanLine: Bool
 
-    private var progress: CGFloat { active ? lyricChunkProgress(words: chunk.words, timeMs: currentTimeMs) : 0 }
+    nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.chunk.id == rhs.chunk.id && lhs.progress == rhs.progress && lhs.active == rhs.active
+            && lhs.style.fontSize == rhs.style.fontSize
+            && lhs.style.secondaryFontSize == rhs.style.secondaryFontSize
+            && lhs.style.wordFadeWidth == rhs.style.wordFadeWidth
+            && lhs.style.activeColor == rhs.style.activeColor
+            && lhs.style.inactiveColor == rhs.style.inactiveColor
+            && lhs.hasRubyLine == rhs.hasRubyLine && lhs.hasRomanLine == rhs.hasRomanLine
+    }
     var body: some View {
-        let bleed = lyricEffectBleed(fontSize: style.fontSize, characterCount: chunk.displayText.count)
+        let bleed = lyricEffectBleed(fontSize: style.fontSize, characterCount: chunk.characters.count)
         VStack(spacing: 0) {
             if hasRubyLine {
                 Text(chunk.rubyText.isEmpty ? " " : chunk.rubyText)
                     .font(.system(size: style.fontSize * 0.5, weight: .bold))
                     .frame(height: style.fontSize * 0.5)
             }
-            ChunkText(text: chunk.displayText, progress: progress, emphasize: chunk.emphasizes, amount: chunk.emphasisAmount, style: style)
-                .foregroundStyle(active ? style.activeColor.opacity(0.4) : style.inactiveColor)
-                .padding(bleed)
-                .overlay {
-                    ChunkText(text: chunk.displayText, progress: progress, emphasize: chunk.emphasizes, amount: chunk.emphasisAmount, style: style, showsGlow: true)
-                        .foregroundStyle(style.activeColor)
-                        .padding(bleed)
-                        .mask {
-                            WordProgressMask(
-                                progress: progress,
-                                fadeWidth: style.fontSize * style.wordFadeWidth,
-                                contentInset: bleed
-                            )
-                        }
-                }
-                // Expand the compositing surface, then restore the original
-                // word metrics so wrapping and line spacing never jump.
-                .padding(-bleed)
+            wordContent(bleed: bleed)
                 .offset(y: active ? -style.fontSize * 0.05 * progress : 0)
             if hasRomanLine {
                 Text(chunk.romanText.isEmpty ? " " : chunk.romanText)
@@ -806,10 +833,37 @@ private struct TimedChunkView: View {
             }
         }
     }
+    @ViewBuilder private func wordContent(bleed: CGFloat) -> some View {
+        if progress <= 0 || progress >= 1 {
+            // Stable glyph layout, but no duplicate text, mask, or offscreen
+            // compositing surface for unstarted/completed words.
+            chunkText(showsGlow: false)
+                .foregroundStyle(progress >= 1 ? style.activeColor : (active ? style.activeColor.opacity(0.4) : style.inactiveColor))
+        } else {
+            chunkText(showsGlow: false)
+                .foregroundStyle(style.activeColor.opacity(0.4))
+                .padding(bleed)
+                .overlay {
+                    chunkText(showsGlow: true)
+                        .foregroundStyle(style.activeColor)
+                        .padding(bleed)
+                        .mask {
+                            WordProgressMask(progress: progress, fadeWidth: style.fontSize * style.wordFadeWidth, contentInset: bleed)
+                        }
+                }
+                .padding(-bleed)
+        }
+    }
+
+    private func chunkText(showsGlow: Bool) -> some View {
+        ChunkText(text: chunk.displayText, characters: chunk.characters, progress: progress,
+                  emphasize: chunk.emphasizes, amount: chunk.emphasisAmount, style: style, showsGlow: showsGlow)
+    }
 }
 
 private struct ChunkText: View {
     let text: String
+    let characters: [String]
     let progress: CGFloat
     let emphasize: Bool
     let amount: CGFloat
@@ -819,14 +873,14 @@ private struct ChunkText: View {
     var body: some View {
         if emphasize {
             HStack(alignment: .bottom, spacing: 0) {
-                ForEach(Array(text.enumerated()), id: \.offset) { index, character in
+                ForEach(characters.indices, id: \.self) { index in
                     let motion = calculateEmphasisCharacterMotion(
                         progress: progress,
                         characterIndex: index,
-                        characterCount: text.count,
+                        characterCount: characters.count,
                         amount: amount
                     )
-                    Text(String(character))
+                    Text(characters[index])
                         .font(.system(size: style.fontSize, weight: .bold, design: .default))
                         .scaleEffect(motion.scale)
                         .offset(x: motion.translationXEm * style.fontSize, y: motion.translationYEm * style.fontSize)

@@ -299,9 +299,9 @@ import Testing
         #expect(playerPageTarget(currentPage: 0, translation: 120, projectedTranslation: 180, pageWidth: 390) == 0)
     }
 
-    @Test func lyricTimelineUsesPeriodicLargeScreenCadenceAndSleepsWhenInactive() {
-        #expect(abs(lyricTimelineInterval(largeScreenOptimizations: true, updatesFrames: true) - 1.0 / 24.0) < 0.0001)
-        #expect(abs(lyricTimelineInterval(largeScreenOptimizations: false, updatesFrames: true) - 1.0 / 30.0) < 0.0001)
+    @Test func lyricBoundaryPollingIsCoarseAndSleepsWhenInactive() {
+        #expect(abs(lyricTimelineInterval(largeScreenOptimizations: true, updatesFrames: true) - 1.0 / 10.0) < 0.0001)
+        #expect(abs(lyricTimelineInterval(largeScreenOptimizations: false, updatesFrames: true) - 1.0 / 10.0) < 0.0001)
         #expect(lyricTimelineInterval(largeScreenOptimizations: true, updatesFrames: false) == 3_600)
     }
     @Test func playerDismissalRequiresDistanceOrADownwardFlick() {
@@ -380,6 +380,32 @@ import Testing
         model.beginHorizontalSwipe()
         #expect(!model.isUserScrolling)
         model.cancelTasks()
+    }
+
+    @Test @MainActor func lyricWrappingCacheTracksWidthFontMetricsAndSpacing() {
+        var layout = BalancedLyricLayout(trailingAlignment: false)
+        let sizes = [CGSize(width: 40, height: 30), CGSize(width: 40, height: 30)]
+        var cache = BalancedLyricLayout.Cache(sizes: sizes)
+        #expect(layout.cachedRows(width: 100, cache: &cache) == [0..<2])
+        for _ in 0..<120 {
+            cache.updateSizes(sizes)
+            #expect(cache.width == 100) // Progress-only frames preserve the cached breakpoints.
+            #expect(layout.cachedRows(width: 100, cache: &cache) == [0..<2])
+        }
+        #expect(layout.cachedRows(width: 60, cache: &cache) == [0..<1, 1..<2])
+        cache.updateSizes([CGSize(width: 60, height: 45), CGSize(width: 60, height: 45)])
+        #expect(cache.width == nil)
+        #expect(layout.cachedRows(width: 100, cache: &cache) == [0..<1, 1..<2])
+        cache.updateSizes(sizes)
+        layout.horizontalSpacing = 30
+        #expect(layout.cachedRows(width: 100, cache: &cache) == [0..<1, 1..<2])
+    }
+
+    @Test func lyricCharacterCachePreservesComposedGraphemes() {
+        let text = "e\u{301}👨‍👩‍👧‍👦好"
+        let chunk = LyricWordChunk(id: "unicode", words: [.init(startTime: 0, endTime: 2_000, word: text)])
+        #expect(chunk.characters.count == 3)
+        #expect(chunk.characters.joined() == chunk.displayText)
     }
 
 }

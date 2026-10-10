@@ -5,6 +5,7 @@ struct LyricWordChunk: Identifiable, Hashable {
     var words: [LyricWord]
     let text: String
     let displayText: String
+    let characters: [String]
     let rubyText: String
     let romanText: String
     let emphasisAmount: CGFloat
@@ -16,6 +17,7 @@ struct LyricWordChunk: Identifiable, Hashable {
         self.words = words
         text = words.map(\.word).joined()
         displayText = words.map(maskedLyricWord).joined()
+        characters = displayText.map(String.init)
         rubyText = words.flatMap(\.ruby).map(\.word).joined()
         romanText = words.map(\.romanWord).joined()
         let duration = max(1, (words.last?.endTime ?? 0) - (words.first?.startTime ?? 0))
@@ -161,20 +163,47 @@ struct BalancedLyricLayout: Layout {
     var trailingAlignment: Bool
     var horizontalSpacing: CGFloat = 0
 
-    struct Cache { var sizes: [CGSize] = [] }
+    struct Cache {
+        var sizes: [CGSize] = []
+        var rows: [Range<Int>] = []
+        var width: CGFloat?
+        var spacing: CGFloat?
 
-    func makeCache(subviews: Subviews) -> Cache { .init() }
+        mutating func updateSizes(_ newSizes: [CGSize]) {
+            guard sizes != newSizes else { return }
+            sizes = newSizes
+            width = nil
+        }
+    }
+
+    func makeCache(subviews: Subviews) -> Cache {
+        Cache(sizes: subviews.map { $0.sizeThatFits(.unspecified) })
+    }
+
+    func updateCache(_ cache: inout Cache, subviews: Subviews) {
+        let sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        cache.updateSizes(sizes)
+    }
+
+    func cachedRows(width: CGFloat, cache: inout Cache) -> [Range<Int>] {
+        if cache.width != width || cache.spacing != horizontalSpacing {
+            cache.rows = calculateRows(sizes: cache.sizes, width: width)
+            cache.width = width
+            cache.spacing = horizontalSpacing
+        }
+        return cache.rows
+    }
 
     func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) -> CGSize {
-        cache.sizes = subviews.map { $0.sizeThatFits(.unspecified) }
+        updateCache(&cache, subviews: subviews)
         let width = proposal.width ?? cache.sizes.reduce(0) { $0 + $1.width }
-        let rows = calculateRows(sizes: cache.sizes, width: width)
+        let rows = cachedRows(width: width, cache: &cache)
         return .init(width: width, height: rows.reduce(0) { $0 + rowHeight($1, cache.sizes) })
     }
 
     func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout Cache) {
-        if cache.sizes.count != subviews.count { cache.sizes = subviews.map { $0.sizeThatFits(.unspecified) } }
-        let rows = calculateRows(sizes: cache.sizes, width: bounds.width)
+        if cache.sizes.count != subviews.count { updateCache(&cache, subviews: subviews) }
+        let rows = cachedRows(width: bounds.width, cache: &cache)
         var y = bounds.minY
         for range in rows {
             let height = rowHeight(range, cache.sizes)
@@ -190,7 +219,7 @@ struct BalancedLyricLayout: Layout {
     }
 
     private func rowHeight(_ range: Range<Int>, _ sizes: [CGSize]) -> CGFloat {
-        range.map { sizes[$0].height }.max() ?? 0
+        range.reduce(CGFloat.zero) { max($0, sizes[$1].height) }
     }
 
     private func calculateRows(sizes: [CGSize], width: CGFloat) -> [Range<Int>] {
@@ -198,13 +227,13 @@ struct BalancedLyricLayout: Layout {
         let count = sizes.count
         var prefix = Array(repeating: CGFloat.zero, count: count + 1)
         for index in sizes.indices { prefix[index + 1] = prefix[index] + sizes[index].width }
-        if prefix[count] <= width { return [0..<count] }
+        if prefix[count] + CGFloat(max(0, count - 1)) * horizontalSpacing <= width { return [0..<count] }
         var costs = Array(repeating: CGFloat.infinity, count: count + 1)
         var next = Array(repeating: -1, count: count + 1)
         costs[count] = 0
         for start in stride(from: count - 1, through: 0, by: -1) {
             for end in (start + 1)...count {
-                let lineWidth = prefix[end] - prefix[start]
+                let lineWidth = prefix[end] - prefix[start] + CGFloat(max(0, end - start - 1)) * horizontalSpacing
                 if lineWidth > width && end > start + 1 { break }
                 let overflow = max(0, lineWidth - width)
                 let slack = max(0, width - lineWidth)
