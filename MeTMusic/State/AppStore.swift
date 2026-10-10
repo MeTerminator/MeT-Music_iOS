@@ -43,7 +43,7 @@ final class AppStore: ObservableObject {
 
     @Published var soundQuality = "hq"
     @Published var lyricOffsetMs: Int64 = 0
-    @Published var lyricLeadMs: Int64 = 300
+    @Published var lyricLeadMs: Int64 = 0
     @Published var lyricFontSize: Double = 32
     @Published var translationFontSize: Double = 16
     @Published var removeQRCInformation = true
@@ -537,7 +537,7 @@ final class AppStore: ObservableObject {
         soundQuality = defaults.string(forKey: "sound_quality") ?? "hq"
         playbackMode = PlaybackMode(rawValue: defaults.string(forKey: "playback_mode") ?? "") ?? .sequence
         lyricOffsetMs = Int64(defaults.integer(forKey: "lyric_offset"))
-        lyricLeadMs = defaults.object(forKey: "lyric_lead") == nil ? 300 : Int64(defaults.integer(forKey: "lyric_lead"))
+        lyricLeadMs = defaults.object(forKey: "lyric_lead") == nil ? 0 : Int64(defaults.integer(forKey: "lyric_lead"))
         lyricFontSize = defaults.object(forKey: "lyric_font_size") == nil ? 32 : defaults.double(forKey: "lyric_font_size")
         translationFontSize = defaults.object(forKey: "translation_font_size") == nil ? 16 : defaults.double(forKey: "translation_font_size")
         removeQRCInformation = defaults.object(forKey: "remove_qrc_song_info") == nil ? true : defaults.bool(forKey: "remove_qrc_song_info")
