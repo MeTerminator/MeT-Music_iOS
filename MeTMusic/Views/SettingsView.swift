@@ -68,7 +68,7 @@ struct SettingsView: View {
         #endif
         settingsForm
       }
-      .navigationTitle("设置")
+      .musicNavigationTitle("设置")
       .musicNavigationBarHidden(false)
       .task { await store.refreshCacheSizes() }
       .confirmationDialog("确定退出登录？", isPresented: $model.confirmLogout, titleVisibility: .visible) {

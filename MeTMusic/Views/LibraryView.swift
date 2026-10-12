@@ -9,7 +9,7 @@ import AppKit
 struct LibraryView: View {
     @EnvironmentObject private var store: AppStore
 
-    private enum Destination: Hashable { case together, settings }
+    private enum Destination: Hashable { case together, settings, cached }
 
     var body: some View {
         NavigationStack {
@@ -44,11 +44,15 @@ struct LibraryView: View {
                 }
             }
             .musicNavigationBarHidden(true)
+            #if os(macOS)
+            .musicNavigationTitle("MeT-Music")
+            #endif
             .navigationDestination(for: Playlist.self) { PlaylistDetailView(playlist: $0) }
             .navigationDestination(for: Destination.self) { destination in
                 switch destination {
                 case .together: ListenTogetherView(usesNavigationStack: false)
                 case .settings: SettingsView(usesNavigationStack: false)
+                case .cached: CachedAudioView()
                 }
             }
         }
@@ -68,6 +72,12 @@ struct LibraryView: View {
                 Image(systemName: "person.2.wave.2").frame(width: 44, height: 44)
             }
             .accessibilityLabel("一起听")
+            #if os(macOS)
+            NavigationLink(value: Destination.cached) {
+                Image(systemName: "externaldrive").frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("已缓存歌曲")
+            #endif
             NavigationLink(value: Destination.settings) {
                 Image(systemName: "gearshape").frame(width: 44, height: 44)
             }
@@ -129,11 +139,10 @@ struct PlaylistDetailView: View {
                 }
             }
             .listStyle(.inset)
+            .macTransparentScrollBackground()
+            .musicNavigationTitle(playlist.name)
             #if os(macOS)
-            .navigationTitle(store.isPlayerPresented ? "" : playlist.name)
             .navigationBarBackButtonHidden(store.isPlayerPresented)
-            #else
-            .navigationTitle(playlist.name)
             #endif
             .musicNavigationBarHidden(false)
             .task { model.songs = await store.tracks(for: playlist) }
@@ -306,12 +315,33 @@ private final class ArtworkModel: ObservableObject {
 }
 
 extension View {
+    func musicNavigationTitle(_ title: String) -> some View {
+        modifier(MusicNavigationTitle(title: title))
+    }
+
     @ViewBuilder
     func musicNavigationBarHidden(_ hidden: Bool) -> some View {
         #if os(iOS)
         toolbar(hidden ? .hidden : .visible, for: .navigationBar)
         #else
         self
+        #endif
+    }
+}
+
+private struct MusicNavigationTitle: ViewModifier {
+    #if os(macOS)
+    @EnvironmentObject private var store: AppStore
+    #endif
+    let title: String
+
+    func body(content: Content) -> some View {
+        #if os(macOS)
+        // Every mounted navigation column agrees on the window title while
+        // the player is open, including columns behind the player overlay.
+        content.navigationTitle(store.isPlayerPresented ? "MeT-Music" : title)
+        #else
+        content.navigationTitle(title)
         #endif
     }
 }

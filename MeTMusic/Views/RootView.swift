@@ -7,6 +7,9 @@ struct RootView: View {
     @ViewBuilder
     var body: some View {
         content
+            #if os(macOS)
+            .opacity(store.isPlayerPresented ? 0 : 1)
+            #endif
             .allowsHitTesting(!store.isPlayerPresented)
             .accessibilityHidden(store.isPlayerPresented)
             .overlay {
@@ -20,7 +23,10 @@ struct RootView: View {
         // Keep title-bar visibility and its safe-area reservation stable across
         // player transitions, including when the library has no toolbar items.
         .toolbar(.visible, for: .windowToolbar)
-        .background(MacWindowContentBoundary(isPlayerPresented: store.isPlayerPresented))
+        .toolbarBackground(.hidden, for: .windowToolbar)
+        .background(MacWindowContentBoundary(
+            artworkURL: store.currentSong?.bestCoverURL
+        ))
         #endif
     }
 
@@ -46,13 +52,8 @@ struct RootView: View {
         .animation(.easeInOut(duration: 0.2), value: store.toast)
     }
 
-    @ViewBuilder
     private var libraryContent: some View {
-        #if os(macOS)
-        MacLibraryView()
-        #else
         LibraryView()
-        #endif
     }
 
     private var tabContent: some View {
@@ -76,7 +77,9 @@ struct RootView: View {
                 }
             #endif
         }
+        #if !os(macOS)
         .background(Color(red: 22 / 255, green: 22 / 255, blue: 28 / 255).ignoresSafeArea())
+        #endif
         .preferredColorScheme(.dark)
     }
 
@@ -112,6 +115,7 @@ private struct PlayerPresentationView: View {
         #if os(macOS)
         // Keep the player and its background below the persistent toolbar.
         .clipped()
+        .navigationTitle("MeT-Music")
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button("关闭播放器", systemImage: "xmark", action: close)

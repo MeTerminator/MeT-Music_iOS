@@ -61,10 +61,12 @@ struct PlayerView: View {
             }
             .modifier(LyricsScreenAwake(isEnabled: usesSideBySideLayout(container.size) || model.page == 1))
         }
+        #if !os(macOS)
         .background {
             // The background stays fixed between pages without participating in layout.
-            artworkBackground
+            MusicArtworkBackground(artworkURL: store.currentSong?.bestCoverURL)
         }
+        #endif
         .preferredColorScheme(.dark)
         .sheet(isPresented: $model.showingQueue) { QueueView() }
         .onChange(of: dismissGestureActive) { _, active in
@@ -200,23 +202,6 @@ struct PlayerView: View {
         }
         .frame(width: size.width, height: size.height)
         .simultaneousGesture(dismissGesture(height: size.height), including: dismissGestureMask)
-    }
-
-    private var artworkBackground: some View {
-        ZStack {
-            Color(red: 0.047, green: 0.047, blue: 0.055)
-            ArtworkView(url: store.currentSong?.bestCoverURL, cornerRadius: 0, maxPixelSize: 160)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .blur(radius: 60, opaque: true)
-            LinearGradient(
-                colors: [.black.opacity(0.5), .black.opacity(0.75), Color(red: 0.039, green: 0.039, blue: 0.047).opacity(0.95)],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-        }
-        #if !os(macOS)
-        .ignoresSafeArea()
-        #endif
     }
 
     private func nowPlayingPage(in size: CGSize, controlsEnabled: Bool = true) -> some View {

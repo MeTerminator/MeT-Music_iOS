@@ -34,7 +34,7 @@ private struct ListenTogetherContent: View {
           #endif
         }
       }
-      .navigationTitle("一起听")
+      .musicNavigationTitle("一起听")
       .musicNavigationBarHidden(false)
       .alert(
         "提示",

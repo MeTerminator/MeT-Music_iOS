@@ -4,33 +4,46 @@
 
   /// Keep content below the native toolbar throughout player transitions.
   struct MacWindowContentBoundary: NSViewRepresentable {
-    var isPlayerPresented: Bool
+    @EnvironmentObject private var store: AppStore
+    var artworkURL: URL?
 
     func makeNSView(context: Context) -> BoundaryView {
       let view = BoundaryView()
-      view.isPlayerPresented = isPlayerPresented
+      view.store = store
+      view.artworkURL = artworkURL
       return view
     }
 
     func updateNSView(_ nsView: BoundaryView, context: Context) {
-      nsView.isPlayerPresented = isPlayerPresented
+      nsView.store = store
+      nsView.artworkURL = artworkURL
       nsView.restoreContentBoundary()
-      DispatchQueue.main.async { [weak nsView] in
-        nsView?.restoreTitleVisibility()
-      }
+    }
+
+    static func dismantleNSView(_ nsView: BoundaryView, coordinator: ()) {
+      nsView.removeBackdrop()
     }
 
     final class BoundaryView: NSView {
-      var isPlayerPresented = false
+      var store: AppStore?
+      var artworkURL: URL? {
+        didSet {
+          if artworkURL != oldValue, let store {
+            backdrop?.rootView = WindowBackdrop(store: store, artworkURL: artworkURL)
+          }
+        }
+      }
+      private var backdrop: BackdropView?
+
+      func removeBackdrop() {
+        backdrop?.removeFromSuperview()
+        backdrop = nil
+      }
 
       override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
+        if window == nil { removeBackdrop() }
         restoreContentBoundary()
-      }
-
-      override func layout() {
-        super.layout()
-        restoreTitleVisibility()
       }
 
       func restoreContentBoundary() {
@@ -40,15 +53,35 @@
           window.styleMask.remove(.fullSizeContentView)
           window.setFrame(frame, display: false)
         }
-        window.titlebarAppearsTransparent = false
-        restoreTitleVisibility()
+        // Draw beneath both the content and native toolbar, without allowing
+        // foreground navigation views to extend underneath window controls.
+        if let store, let contentView = window.contentView, let frameView = contentView.superview {
+          if backdrop?.superview !== frameView {
+            removeBackdrop()
+            let view = BackdropView(rootView: WindowBackdrop(store: store, artworkURL: artworkURL))
+            view.sizingOptions = []
+            view.frame = frameView.bounds
+            view.autoresizingMask = [.width, .height]
+            frameView.addSubview(view, positioned: .below, relativeTo: contentView)
+            backdrop = view
+          }
+        }
+        window.titlebarAppearsTransparent = true
       }
+    }
 
-      func restoreTitleVisibility() {
-        guard let window else { return }
-        let visibility: NSWindow.TitleVisibility = isPlayerPresented ? .hidden : .visible
-        if window.titleVisibility != visibility { window.titleVisibility = visibility }
+    private struct WindowBackdrop: View {
+      let store: AppStore
+      let artworkURL: URL?
+
+      var body: some View {
+        MusicArtworkBackground(artworkURL: artworkURL)
+          .environmentObject(store)
       }
+    }
+
+    private final class BackdropView: NSHostingView<WindowBackdrop> {
+      override func hitTest(_ point: NSPoint) -> NSView? { nil }
     }
   }
 

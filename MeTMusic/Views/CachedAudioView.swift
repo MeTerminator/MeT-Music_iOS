@@ -47,7 +47,8 @@ struct CachedAudioView: View {
                 }
             }
         }
-        .navigationTitle("已缓存音频")
+        .musicNavigationTitle("已缓存音频")
+        .macTransparentScrollBackground()
         .overlay { if loading { ProgressView() } }
         .refreshable { await refresh() }
         .task { await refresh() }

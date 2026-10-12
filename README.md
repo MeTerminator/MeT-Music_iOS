@@ -66,7 +66,7 @@ MeT-Music 的原生 SwiftUI 客户端，覆盖 iPhone、iPad 和原生 macOS App
 | 歌词 | 内置 TTML 解析器、LRC/QRC 回退解析器 |
 | 测试 | Swift Testing、Swift Package Manager |
 
-Xcode 的 `MeT-Music` target 同时支持 iOS 与原生 macOS（非 Mac Catalyst）。Mac 版提供资料库 / 一起听 / 已缓存歌曲侧栏、独立设置窗口和可调整大小的双栏播放器，支持 Apple silicon 与 Intel Mac。
+Xcode 的 `MeT-Music` target 同时支持 iOS 与原生 macOS（非 Mac Catalyst）。Mac 版使用铺满窗口的资料库，顶部提供一起听、已缓存歌曲和设置入口，并提供独立设置窗口和可调整大小的双栏播放器，支持 Apple silicon 与 Intel Mac。
 
 Mac 快捷键：⌘P 播放/暂停、⌘← / ⌘→ 上一首/下一首、⇧⌘L 打开/关闭播放器、Esc 关闭播放器、⌘0 显示主窗口、⌘, 打开设置。关闭主窗口后，使用菜单「文件 → 显示主窗口」重新打开。
 

@@ -52,7 +52,7 @@ private extension View {
             .padding(.horizontal, 20)
             .frame(maxWidth: .infinity)
             .frame(height: 72)
-            .background(Color(red: 30 / 255, green: 30 / 255, blue: 36 / 255).ignoresSafeArea(edges: .bottom))
+            .background(.black.opacity(0.2))
             .overlay(alignment: .top) {
                 Rectangle().fill(.white.opacity(0.1)).frame(height: 1)
             }
