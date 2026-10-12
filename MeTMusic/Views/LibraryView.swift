@@ -129,7 +129,12 @@ struct PlaylistDetailView: View {
                 }
             }
             .listStyle(.inset)
+            #if os(macOS)
+            .navigationTitle(store.isPlayerPresented ? "" : playlist.name)
+            .navigationBarBackButtonHidden(store.isPlayerPresented)
+            #else
             .navigationTitle(playlist.name)
+            #endif
             .musicNavigationBarHidden(false)
             .task { model.songs = await store.tracks(for: playlist) }
             .refreshable { model.songs = await store.tracks(for: playlist, refresh: true) }

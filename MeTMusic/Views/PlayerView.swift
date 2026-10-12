@@ -61,16 +61,6 @@ struct PlayerView: View {
             }
             .modifier(LyricsScreenAwake(isEnabled: usesSideBySideLayout(container.size) || model.page == 1))
         }
-        #if os(macOS)
-        .safeAreaInset(edge: .top, spacing: 0) {
-            HStack {
-                closeButton
-                Spacer()
-            }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 8)
-        }
-        #endif
         .background {
             // The background stays fixed between pages without participating in layout.
             artworkBackground
@@ -224,7 +214,9 @@ struct PlayerView: View {
                 endPoint: .bottom
             )
         }
+        #if !os(macOS)
         .ignoresSafeArea()
+        #endif
     }
 
     private func nowPlayingPage(in size: CGSize, controlsEnabled: Bool = true) -> some View {
@@ -279,19 +271,6 @@ struct PlayerView: View {
             .contentShape(Rectangle())
             .accessibilityHidden(true)
         #endif
-    }
-
-    private var closeButton: some View {
-        Button(action: closePlayer) {
-            Image(systemName: "xmark")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.white)
-                .frame(width: 36, height: 36)
-                .background(.white.opacity(0.12), in: Circle())
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel("关闭播放器")
     }
 
     private var dismissGestureMask: GestureMask {

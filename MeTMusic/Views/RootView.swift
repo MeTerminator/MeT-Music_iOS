@@ -20,6 +20,7 @@ struct RootView: View {
         // Keep title-bar visibility and its safe-area reservation stable across
         // player transitions, including when the library has no toolbar items.
         .toolbar(.visible, for: .windowToolbar)
+        .background(MacWindowContentBoundary(isPlayerPresented: store.isPlayerPresented))
         #endif
     }
 
@@ -109,11 +110,14 @@ private struct PlayerPresentationView: View {
             ))
         }
         #if os(macOS)
-        .background {
-            Button("关闭播放器", action: close)
-                .keyboardShortcut(.cancelAction)
-                .hidden()
-                .accessibilityHidden(true)
+        // Keep the player and its background below the persistent toolbar.
+        .clipped()
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button("关闭播放器", systemImage: "xmark", action: close)
+                    .keyboardShortcut(.cancelAction)
+                    .help("关闭播放器")
+            }
         }
         #endif
         .task {
