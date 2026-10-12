@@ -101,7 +101,7 @@ struct PlaylistDetailView: View {
                                 Text("播放")
                             }
                             .foregroundStyle(.white)
-                            .frame(width: geometry.size.width / 3, height: 54)
+                            .frame(width: geometry.size.width / 3, height: 43)
                             .background(.pink, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
                         .buttonStyle(.plain)
@@ -124,7 +124,7 @@ struct PlaylistDetailView: View {
                             )
                         }
                         .buttonStyle(.plain)
-                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                        .listRowInsets(EdgeInsets(top: 6, leading: 16, bottom: 6, trailing: 16))
                     }
                 }
             }
