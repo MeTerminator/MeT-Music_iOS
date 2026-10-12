@@ -4,6 +4,25 @@ import Testing
 @testable import MeTMusic
 
 @Suite struct TimelineAndLayoutTests {
+    @Test func upcomingLyricsDefocusWithDistanceAndStayReadableWhenBrowsing() {
+        func radius(_ index: Int, upcoming: Bool = true, focused: Bool = false, browsing: Bool = false, enabled: Bool = true) -> CGFloat {
+            lyricUpcomingBlurRadius(
+                index: index, focusIndex: 2, isUpcoming: upcoming,
+                isFocused: focused, isUserScrolling: browsing, enabled: enabled,
+                fontSize: 32, maximumRadius: 5
+            )
+        }
+        #expect(radius(3) > 0)
+        #expect(radius(4) > radius(3))
+        #expect(radius(100) == 5)
+        #expect(radius(3, focused: true) == 0)
+        #expect(radius(1, upcoming: false) == 0)
+        #expect(radius(5, browsing: true) == 0)
+        #expect(radius(5, enabled: false) == 0)
+        // During an interlude the next row is the anchor, but is still unsung.
+        #expect(radius(2) > 0)
+    }
+
     @Test func overlappingLinesRemainActiveTogether() {
         let timeline = LyricTimeline(bounds: [
             .init(startTime: 0, endTime: 2_000),
@@ -290,6 +309,39 @@ import Testing
         let active = calculateEmphasisCharacterMotion(progress: 0.75, characterIndex: 4, characterCount: 5, amount: 1)
         #expect(active.scale > 1)
         #expect(active.translationYEm < 0)
+    }
+
+    @Test func shortSyllableFloatUsesAnIndependentClockAndHoldsItsHeight() {
+        let words = [LyricWord(startTime: 1_000, endTime: 1_100, word: "你")]
+        #expect(lyricWordLift(words: words, timeMs: 900) == 0)
+        // Highlight is complete here, but lift is still near the baseline.
+        #expect(lyricChunkProgress(words: words, timeMs: 1_100) == 1)
+        #expect(lyricWordLift(words: words, timeMs: 1_100) < 0.03)
+        #expect(lyricWordLift(words: words, timeMs: 1_500) == 0.5)
+        #expect(lyricWordLift(words: words, timeMs: 2_000) == 1)
+        #expect(lyricWordLift(words: words, timeMs: 3_000) == 1)
+        let heldNote = [LyricWord(startTime: 1_000, endTime: 5_000, word: "啊")]
+        #expect(lyricWordLift(words: heldNote, timeMs: 3_000) == 0.5)
+        #expect(lyricWordLift(words: [], timeMs: 3_000) == 0)
+    }
+
+    @Test func emphasisAndGlowSettleWithoutEndpointVelocity() {
+        for index in 0..<5 {
+            let start = calculateEmphasisCharacterMotion(progress: 0, characterIndex: index, characterCount: 5, amount: 1)
+            let end = calculateEmphasisCharacterMotion(progress: 1, characterIndex: index, characterCount: 5, amount: 1)
+            #expect(start.scale == 1 && end.scale == 1)
+            #expect(start.verticalScale == 1 && end.verticalScale == 1)
+            #expect(end.translationXEm == 0 && end.translationYEm == 0)
+        }
+        let nearStart = calculateEmphasisCharacterMotion(progress: 0.0001, characterIndex: 0, characterCount: 5, amount: 1)
+        let nearEnd = calculateEmphasisCharacterMotion(progress: 0.9999, characterIndex: 4, characterCount: 5, amount: 1)
+        #expect(nearStart.wave < 0.000001 && nearEnd.wave < 0.000001)
+        let crest = calculateEmphasisCharacterMotion(progress: 0.5, characterIndex: 2, characterCount: 5, amount: 1)
+        #expect(crest.verticalScale > crest.scale)
+        #expect(lyricWordGlow(progress: 0, amount: 1) == 0)
+        #expect(lyricWordGlow(progress: 1, amount: 1) == 0)
+        #expect(lyricWordGlow(progress: 0.5, amount: 1) == 0.65)
+        #expect(lyricWordGlow(progress: 0.9999, amount: 1) < 0.000001)
     }
 
     @Test func lyricViewportRejectsTransientRotationSizes() {

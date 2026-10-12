@@ -16,6 +16,9 @@ public struct AppleMusicLyricsStyle: Sendable {
     public var lineSpacing: CGFloat = 6
     public var backgroundLineScale: CGFloat = 0.7
     public var enableScale = true
+    public var enableBlur = true
+    /// Maximum defocus radius in points for upcoming lyric groups.
+    public var maximumBlurRadius: CGFloat = 5
     public var enableFrameInterpolation = true
     public var playbackRate: Double = 1
     public var alwaysPostpositionBackground = false
@@ -192,11 +195,21 @@ public struct AppleMusicLyricsView: View {
                                         currentTimeProvider: currentTimeProvider,
                                         active: active,
                                         highlighted: snapshot.highlightedIndices.contains(index),
+                                        blurRadius: lyricUpcomingBlurRadius(
+                                            index: index,
+                                            focusIndex: snapshot.highlightedIndices.max() ?? snapshot.scrollTargetIndex,
+                                            isUpcoming: timelineTime < group.renderBounds.startTime,
+                                            isFocused: active || snapshot.highlightedIndices.contains(index),
+                                            isUserScrolling: model.isUserScrolling,
+                                            enabled: style.enableBlur && isActive && !isPageTransitioning && !model.isHorizontalSwiping,
+                                            fontSize: style.fontSize,
+                                            maximumRadius: style.maximumBlurRadius
+                                        ),
                                         isPlaying: isPlaying && isActive
                                             && !isPageTransitioning && !model.isHorizontalSwiping,
                                         isUserScrolling: model.isUserScrolling,
                                         reduceEffects: !isActive || isPageTransitioning || model.isHorizontalSwiping,
-                                        disableTransforms: false,
+                                        disableTransforms: reduceMotion,
                                         style: style,
                                         styleSignature: .init(style),
                                         showTranslation: showTranslation,
@@ -383,7 +396,7 @@ public struct AppleMusicLyricsView: View {
             damping: parameters.damping,
             initialVelocity: 0
         )
-        if animated {
+        if animated && !reduceMotion {
             withAnimation(animation) {
                 proxy.scrollTo(id, anchor: .init(x: 0.5, y: style.alignPosition))
             }
@@ -687,6 +700,7 @@ private struct LyricGroupView: View, Equatable {
     let currentTimeProvider: (@MainActor () -> Int64)?
     let active: Bool
     let highlighted: Bool
+    let blurRadius: CGFloat
     let isPlaying: Bool
     let isUserScrolling: Bool
     let reduceEffects: Bool
@@ -729,7 +743,9 @@ private struct LyricGroupView: View, Equatable {
         .foregroundStyle(highlighted ? style.activeColor : style.inactiveColor)
         .opacity(lyricLineOpacity(isHighlighted: highlighted))
         .scaleEffect(targetScale, anchor: group.main.isDuet ? .trailing : .leading)
-        .animation(.spring(response: 0.38, dampingFraction: 0.86), value: targetScale)
+        .blur(radius: blurRadius)
+        .animation(disableTransforms || reduceEffects ? nil : .easeInOut(duration: 0.4), value: blurRadius)
+        .animation(reduceEffects || disableTransforms ? nil : .spring(response: 0.55, dampingFraction: 0.9), value: targetScale)
         .animation(.easeInOut(duration: 0.4), value: highlighted)
         .animation(.easeOut(duration: 0.18), value: isUserScrolling)
         .animation(nil, value: reduceEffects)
@@ -754,6 +770,7 @@ private struct LyricGroupView: View, Equatable {
             && lhs.currentTimeMs == rhs.currentTimeMs
             && lhs.active == rhs.active
             && lhs.highlighted == rhs.highlighted
+            && lhs.blurRadius == rhs.blurRadius
             && lhs.isPlaying == rhs.isPlaying
             && lhs.isUserScrolling == rhs.isUserScrolling
             && lhs.reduceEffects == rhs.reduceEffects
@@ -783,7 +800,7 @@ private struct LyricGroupView: View, Equatable {
             // off the background vocal's emphasis glow at full height.
             .allowsHitTesting(revealed)
             .animation(
-                .interpolatingSpring(mass: 0.9, stiffness: 115, damping: 16, initialVelocity: 0),
+                disableTransforms || reduceEffects ? nil : .interpolatingSpring(mass: 0.9, stiffness: 115, damping: 16, initialVelocity: 0),
                 value: revealed
             )
         }
@@ -803,6 +820,9 @@ private struct LyricGroupView: View, Equatable {
                     TimedChunkView(
                         chunk: chunk, progress: active ? lyricChunkProgress(words: chunk.words, timeMs: timeMs) : 0,
                         active: active, style: scaledStyle(scale),
+                        lift: active ? lyricWordLift(words: chunk.words, timeMs: timeMs) : 0,
+                        effectsEnabled: !reduceEffects && !disableTransforms,
+                        backgroundVocal: line.isBackground,
                         hasRubyLine: hasRuby, hasRomanLine: hasRoman
                     )
                     .equatable()
@@ -880,12 +900,17 @@ private struct TimedChunkView: View, Equatable {
     let progress: CGFloat
     let active: Bool
     let style: AppleMusicLyricsStyle
+    let lift: Double
+    let effectsEnabled: Bool
+    let backgroundVocal: Bool
 
     var hasRubyLine: Bool
     var hasRomanLine: Bool
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.chunk.id == rhs.chunk.id && lhs.progress == rhs.progress && lhs.active == rhs.active
+            && lhs.lift == rhs.lift && lhs.effectsEnabled == rhs.effectsEnabled
+            && lhs.backgroundVocal == rhs.backgroundVocal
             && lhs.style.fontSize == rhs.style.fontSize
             && lhs.style.secondaryFontSize == rhs.style.secondaryFontSize
             && lhs.style.wordFadeWidth == rhs.style.wordFadeWidth
@@ -902,7 +927,11 @@ private struct TimedChunkView: View, Equatable {
                     .frame(height: style.fontSize * 0.5)
             }
             wordContent(bleed: bleed)
-                .offset(y: active ? -style.fontSize * 0.05 * progress : 0)
+                .modifier(LyricFloatModifier(
+                    offset: effectsEnabled ? -style.fontSize * (backgroundVocal ? 0.1 : 0.05) * lift : 0,
+                    active: active,
+                    effectsEnabled: effectsEnabled
+                ))
             if hasRomanLine {
                 Text(chunk.romanText.isEmpty ? " " : chunk.romanText)
                     .font(.system(size: style.fontSize * 0.5, weight: .bold))
@@ -910,31 +939,53 @@ private struct TimedChunkView: View, Equatable {
             }
         }
     }
-    @ViewBuilder private func wordContent(bleed: CGFloat) -> some View {
-        if progress <= 0 || progress >= 1 {
-            // Stable glyph layout, but no duplicate text, mask, or offscreen
-            // compositing surface for unstarted/completed words.
-            chunkText(showsGlow: false)
-                .foregroundStyle(progress >= 1 ? style.activeColor : (active ? style.activeColor.opacity(0.4) : style.inactiveColor))
-        } else {
-            chunkText(showsGlow: false)
-                .foregroundStyle(style.activeColor.opacity(0.4))
-                .padding(bleed)
-                .overlay {
+    private func wordContent(bleed: CGFloat) -> some View {
+        // Both glyph layers stay mounted for the entire active line. Swapping
+        // the completed highlight into the base changed compositing at word
+        // boundaries, while a newly inserted overlay had no animation history.
+        chunkText(showsGlow: false)
+            .foregroundStyle(active ? style.activeColor.opacity(0.4) : style.inactiveColor)
+            .padding(bleed)
+            .overlay {
+                if active {
                     chunkText(showsGlow: true)
                         .foregroundStyle(style.activeColor)
                         .padding(bleed)
                         .mask {
                             WordProgressMask(progress: progress, fadeWidth: style.fontSize * style.wordFadeWidth, contentInset: bleed)
                         }
+                        // Place the broad halo after the sweep mask so the
+                        // luminous edge can feather beyond the sung glyphs.
+                        .shadow(
+                            color: style.activeColor.opacity(effectsEnabled ? lyricWordGlow(progress: progress, amount: chunk.emphasisAmount) : 0),
+                            radius: style.fontSize * 0.14
+                        )
+                        .transition(.identity)
                 }
-                .padding(-bleed)
-        }
+            }
+            .padding(-bleed)
     }
 
     private func chunkText(showsGlow: Bool) -> some View {
         ChunkText(text: chunk.displayText, characters: chunk.characters, progress: progress,
-                  emphasize: chunk.emphasizes, amount: chunk.emphasisAmount, style: style, showsGlow: showsGlow)
+                  emphasize: chunk.emphasizes, amount: effectsEnabled ? chunk.emphasisAmount : 0, style: style, showsGlow: showsGlow && effectsEnabled)
+    }
+}
+
+/// Interpolate the pose outside the content subtree: smoothing the sweep mask
+/// itself would delay lyric highlighting. Target updates retain SwiftUI's
+/// current presentation offset rather than snapping to the newest clock sample.
+private struct LyricFloatModifier: ViewModifier {
+    let offset: CGFloat
+    let active: Bool
+    let effectsEnabled: Bool
+
+    func body(content: Content) -> some View {
+        content
+            .transaction { $0.animation = nil }
+            .offset(y: offset)
+            .animation(effectsEnabled ? .linear(duration: 0.10) : nil, value: offset)
+            .animation(effectsEnabled ? .easeInOut(duration: 0.35) : nil, value: active)
     }
 }
 
@@ -959,8 +1010,11 @@ private struct ChunkText: View {
                     )
                     Text(characters[index])
                         .font(.system(size: style.fontSize, weight: .bold, design: .default))
-                        .scaleEffect(motion.scale)
+                        .scaleEffect(x: motion.scale, y: motion.verticalScale, anchor: .bottom)
                         .offset(x: motion.translationXEm * style.fontSize, y: motion.translationYEm * style.fontSize)
+                        // Base and highlight must use the exact same pose.
+                        // Independent implicit animations diverge on insertion
+                        // and rapid progress updates, producing double edges.
                         .shadow(color: style.activeColor.opacity(showsGlow ? motion.wave * 0.5 : 0), radius: motion.wave * style.fontSize * 0.25)
                 }
             }
@@ -977,26 +1031,28 @@ private struct WordProgressMask: View {
 
     var body: some View {
         GeometryReader { geometry in
-            if progress <= 0 { Color.clear }
-            else if progress >= 1 { Color.white }
-            else {
-                let stops = lyricProgressMaskStops(
-                    progress: progress,
-                    surfaceWidth: geometry.size.width,
-                    contentInset: contentInset,
-                    fadeWidth: fadeWidth
-                )
-                LinearGradient(
-                    stops: [
-                        .init(color: .white, location: 0),
-                        .init(color: .white, location: stops.opaqueEnd),
-                        .init(color: .clear, location: stops.clearStart),
-                        .init(color: .clear, location: 1),
-                    ],
-                    startPoint: .leading,
-                    endPoint: .trailing
-                )
-            }
+            let stops = lyricProgressMaskStops(
+                progress: progress,
+                surfaceWidth: geometry.size.width,
+                contentInset: contentInset,
+                fadeWidth: fadeWidth
+            )
+            LinearGradient(
+                stops: [
+                    .init(color: .white, location: 0),
+                    .init(color: .white, location: stops.opaqueEnd),
+                    .init(color: .white.opacity(0.84), location: stops.opaqueEnd + (stops.clearStart - stops.opaqueEnd) * 0.25),
+                    .init(color: .white.opacity(0.5), location: (stops.opaqueEnd + stops.clearStart) * 0.5),
+                    .init(color: .white.opacity(0.16), location: stops.opaqueEnd + (stops.clearStart - stops.opaqueEnd) * 0.75),
+                    .init(color: .clear, location: stops.clearStart),
+                    .init(color: .clear, location: 1),
+                ],
+                startPoint: .leading,
+                endPoint: .trailing
+            )
+            // Keep a single mask identity at 0 and 1 too. At completion the
+            // opaque band covers every glyph; no brightness handoff is needed.
+            .opacity(progress <= 0 ? 0 : 1)
         }
     }
 }

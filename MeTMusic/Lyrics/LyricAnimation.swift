@@ -27,6 +27,25 @@ public func lyricLineOpacity(isHighlighted: Bool) -> Double {
     isHighlighted ? 0.85 : 1
 }
 
+/// Upcoming groups gradually fall out of focus with their distance from the
+/// last highlighted group. Overlapping vocals remain clear, and manual
+/// browsing reveals all text. The radius is constant between line boundaries.
+func lyricUpcomingBlurRadius(
+    index: Int,
+    focusIndex: Int,
+    isUpcoming: Bool,
+    isFocused: Bool,
+    isUserScrolling: Bool,
+    enabled: Bool,
+    fontSize: CGFloat,
+    maximumRadius: CGFloat
+) -> CGFloat {
+    guard enabled, isUpcoming, !isFocused, !isUserScrolling else { return 0 }
+    let distance = max(0, index - focusIndex)
+    let scale = min(max(fontSize / 40, 0.8), 1.2)
+    return min(CGFloat(1 + distance) * scale, max(0, maximumRadius))
+}
+
 /// Interlude dots represent a true gap in the complete lyric timeline. A gap
 /// between two adjacent groups is not enough when another overlapping lyric
 /// group is still active.
@@ -205,6 +224,7 @@ public func calculateInterludeDotsAnimation(elapsedMs: Int64, durationMs: Int64)
 public struct EmphasisCharacterMotion: Hashable, Sendable {
     public var wave: Double
     public var scale: Double
+    public var verticalScale: Double = 1
     public var translationXEm: Double
     public var translationYEm: Double
 }
@@ -218,16 +238,36 @@ public func calculateEmphasisCharacterMotion(
     let count = max(characterCount, 1)
     let ratio = count == 1 ? 0 : Double(min(max(characterIndex, 0), count - 1)) / Double(count - 1)
     let local = min(max((min(max(progress, 0), 1) - ratio * 0.4) / 0.6, 0), 1)
-    let wave = max(sin(local * .pi), 0)
+    // Ease into and out of the wave with zero endpoint velocity. A plain
+    // sine started/stopped abruptly, especially on the delayed last glyph.
+    let wave = local > 0 && local < 1 ? pow(sin(local * .pi), 2) : 0
     guard wave > 0 else { return .init(wave: 0, scale: 1, translationXEm: 0, translationYEm: 0) }
-    let strength = max(amount, 0)
+    let strength = min(max(amount, 0), 1.2)
     let centerOffset = Double(count - 1) * 0.5 - Double(characterIndex)
     return .init(
         wave: wave,
         scale: 1 + wave * 0.1 * strength,
+        verticalScale: 1 + wave * 0.13 * strength,
         translationXEm: -wave * 0.015 * strength * centerOffset,
         translationYEm: -wave * 0.05 * strength
     )
+}
+
+/// Float has its own clock: short syllables should not jump upward just
+/// because their highlight finishes in 100 ms. Completed words hold the lift.
+func lyricWordLift(words: [LyricWord], timeMs: Int64) -> Double {
+    guard let first = words.first, let last = words.last else { return 0 }
+    let duration = max(1_000, last.endTime - first.startTime)
+    let progress = min(max(Double(timeMs - first.startTime) / Double(duration), 0), 1)
+    return progress * progress * (3 - 2 * progress)
+}
+
+/// A broad, quiet halo underneath the brighter long-note character glow.
+/// The envelope reaches zero smoothly before the completed-word fast path.
+func lyricWordGlow(progress: Double, amount: Double) -> Double {
+    let phase = min(max(progress, 0), 1)
+    guard phase > 0 && phase < 1 else { return 0 }
+    return pow(sin(phase * .pi), 2) * min(max(amount, 0.12), 0.65)
 }
 
 func lyricChunkProgress(words: [LyricWord], timeMs: Int64) -> CGFloat {
