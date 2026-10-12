@@ -6,17 +6,20 @@ struct RootView: View {
 
     @ViewBuilder
     var body: some View {
-        ZStack {
-            content
-                .allowsHitTesting(!store.isPlayerPresented)
-                .accessibilityHidden(store.isPlayerPresented)
-            if store.isPlayerPresented {
-                PlayerPresentationView(onDismiss: { store.isPlayerPresented = false })
-                    .zIndex(10)
+        content
+            .allowsHitTesting(!store.isPlayerPresented)
+            .accessibilityHidden(store.isPlayerPresented)
+            .overlay {
+                if store.isPlayerPresented {
+                    PlayerPresentationView(onDismiss: { store.isPlayerPresented = false })
+                        .allowsHitTesting(true)
+                        .accessibilityHidden(false)
+                }
             }
-        }
         #if os(macOS)
-        .toolbar(store.isPlayerPresented ? .hidden : .automatic, for: .windowToolbar)
+        // Keep title-bar visibility and its safe-area reservation stable across
+        // player transitions, including when the library has no toolbar items.
+        .toolbar(.visible, for: .windowToolbar)
         #endif
     }
 

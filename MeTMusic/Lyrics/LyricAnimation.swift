@@ -272,17 +272,18 @@ func lyricWordGlow(progress: Double, amount: Double) -> Double {
 
 func lyricChunkProgress(words: [LyricWord], timeMs: Int64) -> CGFloat {
     guard !words.isEmpty else { return 0 }
-    let weights = words.map { max($0.word.count, 1) }
-    let total = max(weights.reduce(0, +), 1)
-    let completed = zip(words, weights).reduce(0.0) { value, pair in
-        let (word, weight) = pair
+    var total = 0
+    var completed = 0.0
+    for word in words {
+        let weight = max(word.word.count, 1)
+        total += weight
         let progress: Double
         if word.endTime <= word.startTime {
             progress = timeMs >= word.startTime ? 1 : 0
         } else {
             progress = min(max(Double(timeMs - word.startTime) / Double(word.endTime - word.startTime), 0), 1)
         }
-        return value + Double(weight) * progress
+        completed += Double(weight) * progress
     }
     return CGFloat(completed / Double(total))
 }

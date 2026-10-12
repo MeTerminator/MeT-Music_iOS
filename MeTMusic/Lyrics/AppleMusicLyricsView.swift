@@ -133,15 +133,13 @@ public struct AppleMusicLyricsView: View {
                             updatesFrames: updatesFrames
                         )
                     )) { context in
-                        let usesAuthoritativeClock = currentTimeProvider != nil
                         let sourceTime = currentTimeProvider?() ?? currentTimeMs
                         let time = model.presentationTime(
                             sourceTimeMs: sourceTime,
                             frameDate: context.date,
                             isPlaying: isPlaying,
                             enabled: style.enableFrameInterpolation && isActive
-                                && !isPageTransitioning && !model.isHorizontalSwiping
-                                && !usesAuthoritativeClock,
+                                && !isPageTransitioning && !model.isHorizontalSwiping,
                             playbackRate: style.playbackRate,
                             discontinuityRevision: playbackDiscontinuityRevision
                         )
@@ -192,7 +190,6 @@ public struct AppleMusicLyricsView: View {
                                         group: group,
                                         currentTimeMs: active ? time : 0,
                                         sampledAt: context.date,
-                                        currentTimeProvider: currentTimeProvider,
                                         active: active,
                                         highlighted: snapshot.highlightedIndices.contains(index),
                                         blurRadius: lyricUpcomingBlurRadius(
@@ -274,6 +271,18 @@ public struct AppleMusicLyricsView: View {
                     model.anchorFrames = frames
                 }
                 .scrollIndicators(.hidden)
+                .background {
+                    #if os(macOS)
+                    LyricScrollWheelObserver {
+                        guard isActive, !isPageTransitioning, !model.isHorizontalSwiping else { return }
+                        if !model.isUserScrolling { beginUserScroll() }
+                        // Wheel events have no DragGesture.onEnded. Rearm on
+                        // each delta, including trackpad momentum, so following
+                        // resumes only after native scrolling has been idle.
+                        scheduleResume(proxy: proxy, groups: groups)
+                    }
+                    #endif
+                }
                 .overlay {
                     if groups.isEmpty {
                         Text("暂无歌词").font(.system(size: 16)).foregroundStyle(.gray)
@@ -697,7 +706,6 @@ private struct LyricGroupView: View, Equatable {
     let group: LyricGroup
     let currentTimeMs: Int64
     let sampledAt: Date
-    let currentTimeProvider: (@MainActor () -> Int64)?
     let active: Bool
     let highlighted: Bool
     let blurRadius: CGFloat
@@ -710,35 +718,28 @@ private struct LyricGroupView: View, Equatable {
     let showTranslation: Bool
     let showRomanization: Bool
     let onTap: () -> Void
+    @State private var isVisible = true
 
     private var animatesWords: Bool {
-        active && isPlaying && !reduceEffects && style.enableFrameInterpolation
+        active && isVisible && isPlaying && !reduceEffects && style.enableFrameInterpolation
     }
 
     var body: some View {
+        let targetScale: CGFloat = style.enableScale && !disableTransforms && !reduceEffects && !highlighted && isPlaying ? 0.97 : 1
         // Let the display choose its native cadence, including ProMotion.
         // Only active rows tick at this rate; boundary polling stays coarse.
         TimelineView(.animation(minimumInterval: nil, paused: !animatesWords)) { frame in
             let elapsed = animatesWords ? max(0, frame.date.timeIntervalSince(sampledAt)) : 0
+            // The boundary clock samples/calibrates the player at 10 Hz.
+            // Render frames extrapolate that sample instead of synchronously
+            // querying AVPlayer once per frame for every overlapping row.
             let time = animatesWords
-                ? (currentTimeProvider?() ?? currentTimeMs + Int64(elapsed * 1_000 * style.playbackRate))
+                ? currentTimeMs + Int64(elapsed * 1_000 * style.playbackRate)
                 : currentTimeMs
             groupContent(timeMs: time)
         }
-    }
-
-    private func groupContent(timeMs: Int64) -> some View {
-        let targetScale: CGFloat = style.enableScale && !disableTransforms && !reduceEffects && !highlighted && isPlaying ? 0.97 : 1
-        let backgroundFirst = !style.alwaysPostpositionBackground
-            && (group.background?.words.first?.startTime ?? .max) < (group.main.words.first?.startTime ?? group.main.startTime)
-        return VStack(
-            alignment: group.main.isDuet ? .trailing : .leading,
-            spacing: style.fontSize * 0.3
-        ) {
-            if backgroundFirst { background(attachedAbove: true, timeMs: timeMs) }
-            line(group.main, chunks: group.mainChunks, scale: 1, timeMs: timeMs)
-            if !backgroundFirst { background(attachedAbove: false, timeMs: timeMs) }
-        }
+        // These effects depend on line state, not word progress. Keep them
+        // outside the display-linked subtree so each frame only updates words.
         .padding(.vertical, style.fontSize * 0.4)
         .foregroundStyle(highlighted ? style.activeColor : style.inactiveColor)
         .opacity(lyricLineOpacity(isHighlighted: highlighted))
@@ -752,6 +753,21 @@ private struct LyricGroupView: View, Equatable {
         .contentShape(Rectangle())
         .onTapGesture(perform: onTap)
         .accessibilityAddTraits(active ? .isSelected : [])
+        .onAppear { isVisible = true }
+        .onDisappear { isVisible = false }
+    }
+
+    private func groupContent(timeMs: Int64) -> some View {
+        let backgroundFirst = !style.alwaysPostpositionBackground
+            && (group.background?.words.first?.startTime ?? .max) < (group.main.words.first?.startTime ?? group.main.startTime)
+        return VStack(
+            alignment: group.main.isDuet ? .trailing : .leading,
+            spacing: style.fontSize * 0.3
+        ) {
+            if backgroundFirst { background(attachedAbove: true, timeMs: timeMs) }
+            line(group.main, chunks: group.mainChunks, scale: 1, timeMs: timeMs)
+            if !backgroundFirst { background(attachedAbove: false, timeMs: timeMs) }
+        }
     }
 
     /// Compares by identity rather than by content.
@@ -809,6 +825,7 @@ private struct LyricGroupView: View, Equatable {
     private func line(_ line: LyricLine, chunks: [LyricWordChunk], scale: CGFloat, timeMs: Int64) -> some View {
         let hasRuby = chunks.contains { !$0.rubyText.isEmpty }
         let hasRoman = chunks.contains { !$0.romanText.isEmpty }
+        let wordStyle = scaledStyle(scale)
         return VStack(alignment: line.isDuet ? .trailing : .leading, spacing: 0) {
             BalancedLyricLayout(
                 trailingAlignment: line.isDuet,
@@ -819,10 +836,11 @@ private struct LyricGroupView: View, Equatable {
                 ForEach(chunks) { chunk in
                     TimedChunkView(
                         chunk: chunk, progress: active ? lyricChunkProgress(words: chunk.words, timeMs: timeMs) : 0,
-                        active: active, style: scaledStyle(scale),
+                        active: active, style: wordStyle,
                         lift: active ? lyricWordLift(words: chunk.words, timeMs: timeMs) : 0,
                         effectsEnabled: !reduceEffects && !disableTransforms,
                         backgroundVocal: line.isBackground,
+                        usesFrameClock: animatesWords,
                         hasRubyLine: hasRuby, hasRomanLine: hasRoman
                     )
                     .equatable()
@@ -903,6 +921,7 @@ private struct TimedChunkView: View, Equatable {
     let lift: Double
     let effectsEnabled: Bool
     let backgroundVocal: Bool
+    let usesFrameClock: Bool
 
     var hasRubyLine: Bool
     var hasRomanLine: Bool
@@ -911,6 +930,7 @@ private struct TimedChunkView: View, Equatable {
         lhs.chunk.id == rhs.chunk.id && lhs.progress == rhs.progress && lhs.active == rhs.active
             && lhs.lift == rhs.lift && lhs.effectsEnabled == rhs.effectsEnabled
             && lhs.backgroundVocal == rhs.backgroundVocal
+            && lhs.usesFrameClock == rhs.usesFrameClock
             && lhs.style.fontSize == rhs.style.fontSize
             && lhs.style.secondaryFontSize == rhs.style.secondaryFontSize
             && lhs.style.wordFadeWidth == rhs.style.wordFadeWidth
@@ -930,7 +950,8 @@ private struct TimedChunkView: View, Equatable {
                 .modifier(LyricFloatModifier(
                     offset: effectsEnabled ? -style.fontSize * (backgroundVocal ? 0.1 : 0.05) * lift : 0,
                     active: active,
-                    effectsEnabled: effectsEnabled
+                    effectsEnabled: effectsEnabled,
+                    usesFrameClock: usesFrameClock
                 ))
             if hasRomanLine {
                 Text(chunk.romanText.isEmpty ? " " : chunk.romanText)
@@ -943,12 +964,12 @@ private struct TimedChunkView: View, Equatable {
         // Both glyph layers stay mounted for the entire active line. Swapping
         // the completed highlight into the base changed compositing at word
         // boundaries, while a newly inserted overlay had no animation history.
-        chunkText(showsGlow: false)
+        chunkText()
             .foregroundStyle(active ? style.activeColor.opacity(0.4) : style.inactiveColor)
             .padding(bleed)
             .overlay {
                 if active {
-                    chunkText(showsGlow: true)
+                    chunkText()
                         .foregroundStyle(style.activeColor)
                         .padding(bleed)
                         .mask {
@@ -958,7 +979,8 @@ private struct TimedChunkView: View, Equatable {
                         // luminous edge can feather beyond the sung glyphs.
                         .shadow(
                             color: style.activeColor.opacity(effectsEnabled ? lyricWordGlow(progress: progress, amount: chunk.emphasisAmount) : 0),
-                            radius: style.fontSize * 0.14
+                            radius: effectsEnabled && progress > 0 && progress < 1
+                                ? style.fontSize * (chunk.emphasizes ? 0.22 : 0.14) : 0
                         )
                         .transition(.identity)
                 }
@@ -966,25 +988,28 @@ private struct TimedChunkView: View, Equatable {
             .padding(-bleed)
     }
 
-    private func chunkText(showsGlow: Bool) -> some View {
+    private func chunkText() -> some View {
         ChunkText(text: chunk.displayText, characters: chunk.characters, progress: progress,
-                  emphasize: chunk.emphasizes, amount: effectsEnabled ? chunk.emphasisAmount : 0, style: style, showsGlow: showsGlow && effectsEnabled)
+                  emphasize: chunk.emphasizes, amount: effectsEnabled ? chunk.emphasisAmount : 0, style: style)
     }
 }
 
-/// Interpolate the pose outside the content subtree: smoothing the sweep mask
-/// itself would delay lyric highlighting. Target updates retain SwiftUI's
-/// current presentation offset rather than snapping to the newest clock sample.
+/// Coarse updates interpolate the pose outside the content subtree, keeping
+/// the sweep mask on the audio clock. Display-linked poses need no extra tween.
 private struct LyricFloatModifier: ViewModifier {
     let offset: CGFloat
     let active: Bool
     let effectsEnabled: Bool
+    let usesFrameClock: Bool
 
     func body(content: Content) -> some View {
         content
             .transaction { $0.animation = nil }
             .offset(y: offset)
-            .animation(effectsEnabled ? .linear(duration: 0.10) : nil, value: offset)
+            // A display-linked clock already supplies intermediate poses.
+            // Restarting an implicit animation on every frame adds work and
+            // makes the pose chase a continuously moving target.
+            .animation(effectsEnabled && !usesFrameClock ? .linear(duration: 0.10) : nil, value: offset)
             .animation(effectsEnabled ? .easeInOut(duration: 0.35) : nil, value: active)
     }
 }
@@ -996,7 +1021,6 @@ private struct ChunkText: View {
     let emphasize: Bool
     let amount: CGFloat
     let style: AppleMusicLyricsStyle
-    var showsGlow = false
 
     var body: some View {
         if emphasize {
@@ -1015,7 +1039,6 @@ private struct ChunkText: View {
                         // Base and highlight must use the exact same pose.
                         // Independent implicit animations diverge on insertion
                         // and rapid progress updates, producing double edges.
-                        .shadow(color: style.activeColor.opacity(showsGlow ? motion.wave * 0.5 : 0), radius: motion.wave * style.fontSize * 0.25)
                 }
             }
         } else {

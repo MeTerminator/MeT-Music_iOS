@@ -4,6 +4,31 @@ import Testing
 @testable import MeTMusic
 
 @Suite struct TimelineAndLayoutTests {
+    @Test func displayFramesStayContinuousAcrossJitteredClockCalibration() {
+        var clock = PlaybackTimeInterpolator(initialSourceTimeMs: 1_000)
+        var previous = Int64(999)
+        // The player is sampled every 100 ms; rows interpolate at display
+        // cadence. Small source jitter must not move glyphs backwards or
+        // produce a visible jump at the next calibration boundary.
+        for tick in 0..<100 {
+            let base = Int64(tick * 100)
+            let jitter: Int64 = tick == 0 ? 0 : (tick.isMultiple(of: 2) ? 8 : -8)
+            let anchor = clock.update(
+                sourceTimeMs: 1_000 + base + jitter,
+                frameNanoseconds: UInt64(base) * 1_000_000,
+                isPlaying: true
+            )
+            for frame in 0..<6 {
+                let elapsed = Int64((Double(frame) * 1_000 / 60).rounded())
+                let display = anchor + elapsed
+                #expect(display > previous)
+                #expect(display - previous <= 33)
+                #expect(abs(display - (1_000 + base + elapsed)) <= 16)
+                previous = display
+            }
+        }
+    }
+
     @Test func upcomingLyricsDefocusWithDistanceAndStayReadableWhenBrowsing() {
         func radius(_ index: Int, upcoming: Bool = true, focused: Bool = false, browsing: Bool = false, enabled: Bool = true) -> CGFloat {
             lyricUpcomingBlurRadius(
