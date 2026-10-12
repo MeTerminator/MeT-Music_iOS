@@ -413,6 +413,33 @@ import Testing
         #expect(calls == 3)
     }
 
+    @Test @MainActor func tappingLyricRestoresFollowingAndCancelsDelayedResume() async {
+        let model = LyricsViewModel(groups: [], timeMs: 0)
+        model.beginUserScroll()
+        var delayedResumeRan = false
+        let delayedResume = Task { @MainActor in
+            await Task.yield()
+            guard !Task.isCancelled else { return }
+            delayedResumeRan = true
+        }
+        model.resumeTask = delayedResume
+        var visited: [Int] = []
+        model.scheduleAutoScroll(index: 1) { visited.append(1) }
+        let pendingScroll = model.autoScrollTask
+        model.resumeAutomaticFollowing()
+        #expect(!model.isUserScrolling)
+        #expect(model.resumeTask == nil)
+        model.scheduleAutoScroll(index: 2, force: true) { visited.append(2) }
+        await delayedResume.value
+        await pendingScroll?.value
+        await model.autoScrollTask?.value
+        #expect(!delayedResumeRan)
+        #expect(visited == [2])
+        model.scheduleAutoScroll(index: 3) { visited.append(3) }
+        await model.autoScrollTask?.value
+        #expect(visited == [2, 3])
+    }
+
     @Test @MainActor func manualLyricDragCancelsAnAlreadyScheduledScroll() async {
         let model = LyricsViewModel(groups: [], timeMs: 0)
         var calls = 0

@@ -201,7 +201,18 @@ public struct AppleMusicLyricsView: View {
                                         styleSignature: .init(style),
                                         showTranslation: showTranslation,
                                         showRomanization: showRomanization,
-                                        onTap: { onLineTap(group.main) }
+                                        onTap: {
+                                            model.resumeAutomaticFollowing()
+                                            onLineTap(group.main)
+                                            model.scheduleAutoScroll(index: index, force: true) {
+                                                scroll(
+                                                    proxy: proxy, to: group.id,
+                                                    index: index, groups: groups,
+                                                    isSeeking: true,
+                                                    animated: model.allowsAnimatedScroll
+                                                )
+                                            }
+                                        }
                                     )
                                     .equatable()
                                 }
@@ -562,6 +573,15 @@ final class LyricsViewModel: ObservableObject {
         lastAutoScrollTarget = nil
         isUserScrolling = false
         suppressAnimatedScrollUntil = Date.now.addingTimeInterval(0.35)
+    }
+
+    func resumeAutomaticFollowing() {
+        resumeTask?.cancel()
+        autoScrollTask?.cancel()
+        resumeTask = nil
+        autoScrollTask = nil
+        lastAutoScrollTarget = nil
+        isUserScrolling = false
     }
 
     func beginUserScroll() {
