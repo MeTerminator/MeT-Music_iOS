@@ -35,30 +35,19 @@ struct MiniPlayerView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.white)
-            .padding(.horizontal, 12)
-            .frame(height: 60)
-            .transparentPlayerGlass()
-            .contentShape(RoundedRectangle(cornerRadius: 32))
+            .padding(.horizontal, 20)
+            .frame(maxWidth: .infinity)
+            .frame(height: 72)
+            .background(Color(red: 30 / 255, green: 30 / 255, blue: 36 / 255).ignoresSafeArea(edges: .bottom))
+            .overlay(alignment: .top) {
+                Rectangle().fill(.white.opacity(0.1)).frame(height: 1)
+            }
+            .contentShape(Rectangle())
             .onTapGesture { store.isPlayerPresented = true }
             .accessibilityElement(children: .contain)
             .accessibilityLabel("正在播放：\(song.name)，\(song.artistText)")
             .sheet(isPresented: $showingQueue) { QueueView() }
         }
-    }
-}
-
-private extension View {
-    @ViewBuilder
-    func transparentPlayerGlass() -> some View {
-        #if os(iOS)
-        if #available(iOS 26.0, *) {
-            glassEffect(.clear.interactive(), in: .rect(cornerRadius: 32))
-        } else {
-            background(.ultraThinMaterial.opacity(0.35), in: RoundedRectangle(cornerRadius: 32))
-        }
-        #else
-        background(.ultraThinMaterial.opacity(0.35), in: RoundedRectangle(cornerRadius: 32))
-        #endif
     }
 }
 

@@ -23,13 +23,13 @@ struct LoginView: View {
                 }
                 TextField("QQ 号", text: $model.qq)
                     .focused($focused)
+                    .onSubmit { login() }
                     .font(.title3)
                     .padding()
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16))
                     .frame(maxWidth: 360)
                 Button {
-                    focused = false
-                    Task { _ = await store.login(qq: model.qq) }
+                    login()
                 } label: {
                     HStack {
                         if store.loadingPlaylists { ProgressView().tint(.white) }
@@ -47,6 +47,11 @@ struct LoginView: View {
             }
             .padding(24)
         }
+    }
+    private func login() {
+        guard !store.loadingPlaylists else { return }
+        focused = false
+        Task { _ = await store.login(qq: model.qq) }
     }
 }
 

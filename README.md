@@ -1,6 +1,6 @@
-# MeT-Music iOS
+# MeT-Music iOS / Mac
 
-MeT-Music 的原生 SwiftUI 客户端，覆盖 iPhone 与 iPad，并为 iPad 横屏和 Apple silicon Mac 上的 iPad App 提供双栏播放器布局。业务能力与 MeT-Music Android / Mobile 端保持一致，音频、后台播放、锁屏媒体信息及系统控制均基于 Apple 原生框架实现。
+MeT-Music 的原生 SwiftUI 客户端，覆盖 iPhone、iPad 和原生 macOS App，为 iPad 横屏与 Mac 提供双栏播放器布局。业务能力与 MeT-Music Android / Mobile 端保持一致，音频、后台播放、锁屏媒体信息及系统控制均基于 Apple 原生框架实现。
 
 > 本项目使用远端 MeT-Music 服务获取歌单、音频地址和歌词。Apple Music 是 Apple Inc. 的商标，本项目与 Apple Inc. 没有官方关联。
 
@@ -17,7 +17,7 @@ MeT-Music 的原生 SwiftUI 客户端，覆盖 iPhone 与 iPad，并为 iPad 横
 - 跳转是一次串行事务：暂停播放 → 确认媒体可 seek（串流先缓存为完整本地文件）→ 零容差 seek → 校验落点 → 恢复播放。
 - 同一时刻只有一次跳转事务；连续点击歌词只会改写事务目标，最终停在最后点击的那一行，不会让播放器同时追多个位置。
 - 支持后台音频、锁屏与控制中心歌曲信息、封面、播放/暂停、上一曲、下一曲和进度跳转。
-- 底部迷你播放器使用系统液态玻璃或原生 Material，并在没有当前歌曲时自动隐藏。
+- 底部迷你播放器采用固定 72 点高度的不透明栏，页面内容在其上方结束，并在没有当前歌曲时自动隐藏。
 
 ### Apple Music 风格歌词
 
@@ -41,7 +41,7 @@ MeT-Music 的原生 SwiftUI 客户端，覆盖 iPhone 与 iPad，并为 iPad 横
 - 背景覆盖安全区，并由当前封面生成模糊色彩背景。
 - 竖屏布局与 iPhone 一致，可在封面控制页和歌词页之间左右滑动。
 - iPad / Mac 横屏时左侧显示封面和播放控制，右侧显示纯歌词区域及翻译开关。
-- 封面页左上角提供关闭按钮，全屏播放器采用淡入淡出过渡。
+- 全屏播放器左上角提供 X 关闭按钮，打开时隐藏原页面及其顶部操作，关闭后恢复原导航状态；Mac 播放器采用淡入淡出过渡。
 - 拖动播放进度条或音量条时会锁定控件手势，不会误触发页面左右切换。
 - 播放队列支持跳转到当前歌曲、TTML 标识及轻量封面加载。
 
@@ -57,7 +57,7 @@ MeT-Music 的原生 SwiftUI 客户端，覆盖 iPhone 与 iPad，并为 iPad 横
 
 | 项目 | 要求或实现 |
 | --- | --- |
-| 系统 | iOS / iPadOS 17.0 及以上 |
+| 系统 | iOS / iPadOS 17.0 及以上；macOS 14.0 及以上 |
 | 语言与界面 | Swift 6、SwiftUI |
 | 音频 | AVFoundation、AVPlayer |
 | 系统媒体控制 | MediaPlayer、MPNowPlayingInfoCenter |
@@ -66,7 +66,9 @@ MeT-Music 的原生 SwiftUI 客户端，覆盖 iPhone 与 iPad，并为 iPad 横
 | 歌词 | 内置 TTML 解析器、LRC/QRC 回退解析器 |
 | 测试 | Swift Testing、Swift Package Manager |
 
-`Package.swift` 同时声明 macOS 14，主要用于共享代码与测试；Xcode App target 面向 iPhone 和 iPad。Mac 使用场景采用 iPad App 兼容布局。
+Xcode 的 `MeT-Music` target 同时支持 iOS 与原生 macOS（非 Mac Catalyst）。Mac 版提供资料库 / 一起听 / 已缓存歌曲侧栏、独立设置窗口和可调整大小的双栏播放器，支持 Apple silicon 与 Intel Mac。
+
+Mac 快捷键：⌘P 播放/暂停、⌘← / ⌘→ 上一首/下一首、⇧⌘L 打开/关闭播放器、Esc 关闭播放器、⌘0 显示主窗口、⌘, 打开设置。关闭主窗口后，使用菜单「文件 → 显示主窗口」重新打开。
 
 ## 播放与歌词时间模型
 
@@ -110,7 +112,9 @@ Android/KMP 功能到原生 iOS 实现的对照见 [MIGRATION.md](MIGRATION.md)�
 2. 使用 Xcode 打开 `MeT-Music-iOS.xcodeproj`。
 3. 选择 `MeT-Music` scheme。
 4. 在 Signing & Capabilities 中选择自己的开发团队。
-5. 选择 iPhone 或 iPad 真机/模拟器运行。
+5. 选择 iPhone / iPad 真机、模拟器，或 **My Mac** 运行原生 Mac App。
+
+Mac 使用 `Configuration/MacInfo.plist` 和独立 Bundle Identifier `top.met6.music.macos`，复用音频、缓存、歌词与一起听逻辑。
 
 应用启用了 Background Modes 中的 Audio。若更换 Bundle Identifier，需要同步检查签名、后台播放和系统媒体控制能力。
 
@@ -120,6 +124,17 @@ Android/KMP 功能到原生 iOS 实现的对照见 [MIGRATION.md](MIGRATION.md)�
 
 ```bash
 swift test
+```
+
+构建原生 Mac App：
+
+```bash
+xcodebuild \
+  -project MeT-Music-iOS.xcodeproj \
+  -scheme MeT-Music \
+  -destination 'platform=macOS' \
+  CODE_SIGNING_ALLOWED=NO \
+  build
 ```
 
 构建 iOS Simulator target：

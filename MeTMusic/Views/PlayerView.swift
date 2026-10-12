@@ -59,6 +59,16 @@ struct PlayerView: View {
             }
             .modifier(LyricsScreenAwake(isEnabled: usesSideBySideLayout(container.size) || model.page == 1))
         }
+        #if os(macOS)
+        .safeAreaInset(edge: .top, spacing: 0) {
+            HStack {
+                closeButton
+                Spacer()
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 8)
+        }
+        #endif
         .background {
             // The background stays fixed between pages without participating in layout.
             artworkBackground
@@ -167,7 +177,11 @@ struct PlayerView: View {
     }
 
     private func usesSideBySideLayout(_ size: CGSize) -> Bool {
+        #if os(macOS)
+        true
+        #else
         size.width > size.height
+        #endif
     }
 
     private func landscapeCover(in size: CGSize) -> some View {
@@ -252,11 +266,25 @@ struct PlayerView: View {
         .frame(height: 48)
     }
 
+    @ViewBuilder
     private var playerHandle: some View {
+        #if os(iOS)
+        HStack {
+            closeButton
+            Spacer()
+        }
+        .frame(height: 44)
+        #endif
+    }
+
+    private var closeButton: some View {
         Button(action: closePlayer) {
-            Capsule().fill(.white.opacity(0.7)).frame(width: 42, height: 5)
-                .frame(maxWidth: .infinity).frame(height: 32)
-                .contentShape(Rectangle())
+            Image(systemName: "xmark")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.white)
+                .frame(width: 36, height: 36)
+                .background(.white.opacity(0.12), in: Circle())
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("关闭播放器")
@@ -298,13 +326,7 @@ struct PlayerView: View {
         compactChrome: Bool
     ) -> some View {
         return VStack(spacing: 0) {
-            if compactChrome {
-                Text("歌词").font(.system(size: 14, weight: .bold))
-                    .foregroundStyle(.white.opacity(0.5))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 24)
-                    .padding(.bottom, 12)
-            } else {
+            if !compactChrome {
                 VStack(spacing: 0) {
                     playerHandle
                     lyricsHeader.padding(.bottom, 16)

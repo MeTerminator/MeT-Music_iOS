@@ -5,6 +5,9 @@ import MediaPlayer
 #if os(iOS)
 import ImageIO
 import UIKit
+#elseif os(macOS)
+import ImageIO
+import AppKit
 #endif
 
 #if canImport(MediaPlayer)
@@ -47,11 +50,17 @@ private final class RemoteCommandBridge: NSObject, @unchecked Sendable {
 }
 #endif
 
-#if os(iOS)
+#if os(iOS) || os(macOS)
+#if os(macOS)
+private typealias NowPlayingImage = NSImage
+#else
+private typealias NowPlayingImage = UIImage
+#endif
+
 /// MPMediaItemArtwork may request its image from a background MediaPlayer
 /// queue, so its provider must not inherit MainActor isolation.
 private enum MediaArtworkFactory {
-    nonisolated static func make(image: UIImage) -> MPMediaItemArtwork {
+    nonisolated static func make(image: NowPlayingImage) -> MPMediaItemArtwork {
         MPMediaItemArtwork(boundsSize: image.size) { _ in image }
     }
 }
@@ -66,7 +75,7 @@ final class NowPlayingController {
     private var currentDurationMs: Int64 = 0
     private var artworkSongID: String?
     private var artworkTask: Task<Void, Never>?
-    #if os(iOS)
+    #if os(iOS) || os(macOS)
     private var artwork: MPMediaItemArtwork?
     #endif
     #if canImport(MediaPlayer)
@@ -101,10 +110,13 @@ final class NowPlayingController {
             artworkTask?.cancel()
             artworkTask = nil
             artworkSongID = nil
-            #if os(iOS)
+            #if os(iOS) || os(macOS)
             artwork = nil
             #endif
             MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            #if os(macOS)
+            MPNowPlayingInfoCenter.default().playbackState = .stopped
+            #endif
             return
         }
 
@@ -125,17 +137,20 @@ final class NowPlayingController {
             MPNowPlayingInfoPropertyPlaybackRate: currentPlaying ? 1.0 : 0.0,
             MPNowPlayingInfoPropertyMediaType: MPNowPlayingInfoMediaType.audio.rawValue,
         ]
-        #if os(iOS)
+        #if os(iOS) || os(macOS)
         if let artwork { info[MPMediaItemPropertyArtwork] = artwork }
         #endif
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        #if os(macOS)
+        MPNowPlayingInfoCenter.default().playbackState = currentPlaying ? .playing : .paused
+        #endif
     }
 
     private func loadArtwork(for song: Song) {
         artworkTask?.cancel()
         artworkTask = nil
         artworkSongID = song.id
-        #if os(iOS)
+        #if os(iOS) || os(macOS)
         artwork = nil
         #endif
 
@@ -143,11 +158,11 @@ final class NowPlayingController {
         artworkTask = Task { [weak self, weak store] in
             guard let store, let data = try? await store.cache.coverData(remoteURL: url),
                   !Task.isCancelled else { return }
-            #if os(iOS)
+            #if os(iOS) || os(macOS)
             guard let image = Self.decodeArtwork(data) else { return }
             #endif
             guard let self, self.artworkSongID == song.id, self.currentSong?.id == song.id else { return }
-            #if os(iOS)
+            #if os(iOS) || os(macOS)
             self.artwork = MediaArtworkFactory.make(image: image)
             #endif
             self.publish()
@@ -155,11 +170,15 @@ final class NowPlayingController {
     }
     #endif
 
-    #if os(iOS)
-    private static func decodeArtwork(_ data: Data) -> UIImage? {
+    #if os(iOS) || os(macOS)
+    private static func decodeArtwork(_ data: Data) -> NowPlayingImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData, nil),
               let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else { return nil }
+#if os(macOS)
+        return NSImage(cgImage: image, size: .zero)
+        #else
         return UIImage(cgImage: image)
+        #endif
     }
     #endif
 
