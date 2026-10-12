@@ -26,7 +26,9 @@ func playerPageTarget(
 }
 
 func playerShouldDismiss(translation: CGFloat, projectedTranslation: CGFloat, height: CGFloat) -> Bool {
-    translation > max(100, height * 0.18)
+    // An upward flick cancels even after crossing the distance threshold.
+    guard projectedTranslation - translation > -60 else { return false }
+    return translation > max(100, height * 0.18)
         || (translation > 24 && projectedTranslation > max(180, height * 0.32))
 }
 
@@ -301,7 +303,9 @@ struct PlayerView: View {
     }
 
     private func dismissGesture(height: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 12)
+        // The surface moves during this gesture. Local coordinates would feed
+        // that movement back into translation and make tracking oscillate.
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
             .updating($dismissGestureActive) { _, active, _ in active = true }
             .onChanged { value in
                 guard !model.isControlDragging, !model.isPaging else { return }
@@ -311,7 +315,11 @@ struct PlayerView: View {
                     model.isDismissing = true
                 }
                 // No implicit animation during tracking: the surface stays under the finger.
-                onDismissDrag(max(0, value.translation.height))
+                var transaction = Transaction(animation: nil)
+                transaction.disablesAnimations = true
+                withTransaction(transaction) {
+                    onDismissDrag(max(0, value.translation.height))
+                }
             }
             .onEnded { value in
                 guard model.isDismissing else { return }

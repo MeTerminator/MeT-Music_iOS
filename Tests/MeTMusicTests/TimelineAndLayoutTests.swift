@@ -392,6 +392,13 @@ import Testing
         #expect(!playerShouldDismiss(translation: -170, projectedTranslation: -400, height: 800))
     }
 
+    @Test func playerDismissalCanBeCancelledByPushingBackUp() {
+        #expect(!playerShouldDismiss(translation: 220, projectedTranslation: 100, height: 800))
+        #expect(!playerShouldDismiss(translation: 70, projectedTranslation: -50, height: 800))
+        #expect(playerShouldDismiss(translation: 220, projectedTranslation: 210, height: 800))
+        #expect(playerShouldDismiss(translation: 220, projectedTranslation: 220, height: 800))
+    }
+
     @Test func emphasisMaskIncludesGlowWithoutChangingWordProgress() {
         let fontSize: CGFloat = 46
         let inset = lyricEffectBleed(fontSize: fontSize, characterCount: 7)

@@ -8,7 +8,6 @@ struct RootView: View {
     var body: some View {
         ZStack {
             content
-                .opacity(store.isPlayerPresented ? 0 : 1)
                 .allowsHitTesting(!store.isPlayerPresented)
                 .accessibilityHidden(store.isPlayerPresented)
             if store.isPlayerPresented {
