@@ -237,7 +237,7 @@ final class AudioPlayer: ObservableObject {
 
     /// Publishes a requested position before playback can reach it, and stops
     /// AVPlayer's clock from contradicting it meanwhile. Used while a precise
-    /// seek is still waiting on its media — a stream being cached, an item
+    /// seek is still waiting on its media — a stream buffering, an item
     /// being reloaded — so the progress bar and the lyrics both sit on the
     /// position the user asked for.
     func pinSeekTarget(_ target: Int64) {

@@ -202,13 +202,13 @@ final class ListenTogetherStore: ObservableObject {
                     if let cached = await app.cache.remoteURL(songID: song.id, quality: app.soundQuality) { remote = cached }
                     else { remote = try await app.api.songURL(id: song.id, quality: app.soundQuality) }
                     await app.cache.setRemoteURL(remote, songID: song.id, quality: app.soundQuality)
-                    local = try await app.cache.audioURL(songID: song.id, remoteURL: remote, waitForCache: true)
+                    local = try await app.cache.audioURL(songID: song.id, remoteURL: remote, waitForCache: false)
                 }
                 guard request == generation, isInRoom,
                       let latest = room,
                       latest.playlist.indices.contains(latest.currentSongIndex),
                       latest.playlist[latest.currentSongIndex].id == song.id else { return }
-                // Recompute after download so caching time never leaves this client behind.
+                // Recompute after URL resolution so this client starts at the latest room position.
                 let position = roomPositionMs(latest, stateServerTime: lastRoomStateServerMs)
                 roomSongID = song.id
                 await app.playTogether(song: song, localURL: local, positionMs: position, isPlaying: latest.isPlaying)

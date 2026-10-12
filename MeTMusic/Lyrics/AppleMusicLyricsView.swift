@@ -15,7 +15,6 @@ public struct AppleMusicLyricsStyle: Sendable {
     /// stay tight while separate lyrics keep Apple Music's clear visual rhythm.
     public var lineSpacing: CGFloat = 6
     public var backgroundLineScale: CGFloat = 0.7
-    public var enableBlur = true
     public var enableScale = true
     public var enableFrameInterpolation = true
     public var playbackRate: Double = 1
@@ -197,12 +196,6 @@ public struct AppleMusicLyricsView: View {
                                             && !isPageTransitioning && !model.isHorizontalSwiping,
                                         isUserScrolling: model.isUserScrolling,
                                         reduceEffects: !isActive || isPageTransitioning || model.isHorizontalSwiping,
-                                        // Blurring a lyric costs an offscreen
-                                        // pass, and every lyric scrolled past
-                                        // stays realized, so only the ones that
-                                        // can actually be on screen are blurred.
-                                        disableBlur: abs(index - snapshot.scrollTargetIndex) > 16,
-                                        blurRadius: min(5, CGFloat(abs(index - snapshot.scrollTargetIndex) + (index < snapshot.scrollTargetIndex ? 2 : 1)) * 0.8),
                                         disableTransforms: false,
                                         style: style,
                                         styleSignature: .init(style),
@@ -228,6 +221,16 @@ public struct AppleMusicLyricsView: View {
                                 .frame(maxWidth: max(0, geometry.size.width - style.horizontalPadding * (hasDuet ? 4 : 2)) * style.lineWidthFraction,
                                        alignment: group.main.isDuet ? .trailing : .leading)
                                 .frame(maxWidth: .infinity, alignment: group.main.isDuet ? .trailing : .leading)
+                                .background {
+                                    if index == snapshot.scrollTargetIndex {
+                                        GeometryReader { row in
+                                            Color.clear.preference(
+                                                key: LyricAnchorFramePreference.self,
+                                                value: [index: row.frame(in: .named(model.scrollCoordinateSpace))]
+                                            )
+                                        }
+                                    }
+                                }
                             }
                             Color.clear.frame(height: geometry.size.height * (1 - style.alignPosition))
                         }
@@ -235,11 +238,16 @@ public struct AppleMusicLyricsView: View {
                         .onChange(of: LyricScrollRequest(
                             index: snapshot.scrollTargetIndex,
                             isSeeking: snapshot.isSeeking,
-                            lineBoundaryIndex: snapshot.playingIndices.max()
+                            lineBoundaryIndex: snapshot.playingIndices.max(),
+                            positionCheckTick: Int(context.date.timeIntervalSince(model.timelineEpoch) * 2)
                         ), initial: true) { _, request in
                             followLyrics(request, proxy: proxy, groups: groups, viewport: geometry.size)
                         }
                     }
+                }
+                .coordinateSpace(name: model.scrollCoordinateSpace)
+                .onPreferenceChange(LyricAnchorFramePreference.self) { frames in
+                    model.anchorFrames = frames
                 }
                 .scrollIndicators(.hidden)
                 .overlay {
@@ -318,13 +326,16 @@ public struct AppleMusicLyricsView: View {
         groups: [LyricGroup],
         viewport: CGSize
     ) {
-        guard isActive, !isPageTransitioning else { return }
+        guard isActive, !isPageTransitioning, !model.isHorizontalSwiping else { return }
         if let boundaryIndex = request.lineBoundaryIndex {
             model.scheduleClockCalibration(index: boundaryIndex) { onLineBoundary() }
         }
         guard lyricViewportIsUsable(viewport), !model.isUserScrolling,
               groups.indices.contains(request.index) else { return }
-        model.scheduleAutoScroll(index: request.index) {
+        let needsCorrection = model.anchorNeedsCorrection(
+            index: request.index, viewportHeight: viewport.height, alignPosition: style.alignPosition
+        )
+        model.scheduleAutoScroll(index: request.index, force: needsCorrection) {
             scroll(
                 proxy: proxy, to: groups[request.index].id,
                 index: request.index, groups: groups,
@@ -451,6 +462,14 @@ private struct LyricScrollRequest: Equatable {
     var index: Int
     var isSeeking: Bool
     var lineBoundaryIndex: Int?
+    var positionCheckTick: Int = 0
+}
+
+private struct LyricAnchorFramePreference: PreferenceKey {
+    static let defaultValue: [Int: CGRect] = [:]
+    static func reduce(value: inout [Int: CGRect], nextValue: () -> [Int: CGRect]) {
+        value.merge(nextValue(), uniquingKeysWith: { _, new in new })
+    }
 }
 
 @MainActor
@@ -467,6 +486,9 @@ final class LyricsViewModel: ObservableObject {
     private var interpolator: PlaybackTimeInterpolator
     private(set) var lastPresentationTimeMs: Int64
     private(set) var sourceSignature: LyricSourceSignature?
+    let scrollCoordinateSpace = UUID()
+    var anchorFrames: [Int: CGRect] = [:]
+    private var lastAutoScrollDate = Date.distantPast
     private var lastAutoScrollTarget: Int?
     private var lastCalibratedLineIndex: Int?
     private var suppressAnimatedScrollUntil = Date.distantPast
@@ -485,6 +507,7 @@ final class LyricsViewModel: ObservableObject {
         isUserScrolling = false
         isHorizontalSwiping = false
         self.groups = groups
+        anchorFrames = [:]
         self.sourceSignature = sourceSignature
         timeline = Self.makeTimeline(groups)
         interpolator = .init(initialSourceTimeMs: timeMs)
@@ -508,13 +531,23 @@ final class LyricsViewModel: ObservableObject {
         }
     }
 
-    func scheduleAutoScroll(index: Int, action: @escaping @MainActor () -> Void) {
-        guard lastAutoScrollTarget != index else { return }
+    func anchorNeedsCorrection(index: Int, viewportHeight: CGFloat, alignPosition: CGFloat) -> Bool {
+        guard !isUserScrolling, !isHorizontalSwiping,
+              Date.now.timeIntervalSince(lastAutoScrollDate) >= 1 else { return false }
+        // A lazy row outside the realized area also needs to be brought back.
+        guard let frame = anchorFrames[index] else { return true }
+        let expectedTop = (viewportHeight - frame.height) * alignPosition
+        return abs(frame.minY - expectedTop) > 4
+    }
+
+    func scheduleAutoScroll(index: Int, force: Bool = false, action: @escaping @MainActor () -> Void) {
+        guard force || lastAutoScrollTarget != index else { return }
         autoScrollTask?.cancel()
         autoScrollTask = Task { @MainActor [weak self] in
             await Task.yield()
-            guard !Task.isCancelled, let self, self.lastAutoScrollTarget != index else { return }
+            guard !Task.isCancelled, let self, force || self.lastAutoScrollTarget != index else { return }
             self.lastAutoScrollTarget = index
+            self.lastAutoScrollDate = .now
             action()
         }
     }
@@ -609,7 +642,6 @@ private struct LyricRenderStyleSignature: Equatable, Sendable {
     let wordFadeWidth: CGFloat
     let enableFrameInterpolation: Bool
     let playbackRate: Double
-    let enableBlur: Bool
     let enableScale: Bool
     let backgroundLineScale: CGFloat
     let alwaysPostpositionBackground: Bool
@@ -622,7 +654,6 @@ private struct LyricRenderStyleSignature: Equatable, Sendable {
         wordFadeWidth = style.wordFadeWidth
         enableFrameInterpolation = style.enableFrameInterpolation
         playbackRate = style.playbackRate
-        enableBlur = style.enableBlur
         enableScale = style.enableScale
         backgroundLineScale = style.backgroundLineScale
         alwaysPostpositionBackground = style.alwaysPostpositionBackground
@@ -639,8 +670,6 @@ private struct LyricGroupView: View, Equatable {
     let isPlaying: Bool
     let isUserScrolling: Bool
     let reduceEffects: Bool
-    let disableBlur: Bool
-    let blurRadius: CGFloat
     let disableTransforms: Bool
     let style: AppleMusicLyricsStyle
     let styleSignature: LyricRenderStyleSignature
@@ -681,9 +710,7 @@ private struct LyricGroupView: View, Equatable {
         .opacity(lyricLineOpacity(isHighlighted: highlighted))
         .scaleEffect(targetScale, anchor: group.main.isDuet ? .trailing : .leading)
         .animation(.spring(response: 0.38, dampingFraction: 0.86), value: targetScale)
-        .blur(radius: style.enableBlur && !disableBlur && !reduceEffects && !isUserScrolling && !highlighted ? blurRadius : 0)
         .animation(.easeInOut(duration: 0.4), value: highlighted)
-        .animation(.easeInOut(duration: 0.4), value: blurRadius)
         .animation(.easeOut(duration: 0.18), value: isUserScrolling)
         .animation(nil, value: reduceEffects)
         .contentShape(Rectangle())
@@ -710,8 +737,6 @@ private struct LyricGroupView: View, Equatable {
             && lhs.isPlaying == rhs.isPlaying
             && lhs.isUserScrolling == rhs.isUserScrolling
             && lhs.reduceEffects == rhs.reduceEffects
-            && lhs.disableBlur == rhs.disableBlur
-            && lhs.blurRadius == rhs.blurRadius
             && lhs.disableTransforms == rhs.disableTransforms
             && lhs.styleSignature == rhs.styleSignature
             && lhs.showTranslation == rhs.showTranslation

@@ -171,12 +171,6 @@ struct SettingsView: View {
       }
       if shows(.cache) {
         Section {
-          Toggle(
-            "预缓存模式",
-            isOn: Binding(
-              get: { store.precacheEnabled },
-              set: store.setPrecacheEnabled
-            ))
           NavigationLink("管理已缓存音频") { CachedAudioView() }
           ForEach(CacheStore.Category.allCases, id: \.self) { category in
             HStack {
@@ -192,7 +186,7 @@ struct SettingsView: View {
         } header: {
           Text("缓存")
         } footer: {
-          Text("预缓存模式会先把整首歌下载完再开始播放，下载期间播放进度条显示下载进度。")
+          Text("所有音质均在无完整缓存时使用串流播放，并在后台缓存。后续播放有完整缓存的歌曲时使用本地缓存。")
         }
       }
       if shows(.about) {

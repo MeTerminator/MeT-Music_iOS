@@ -53,12 +53,25 @@ struct RootView: View {
     }
 
     private var tabContent: some View {
-        VStack(spacing: 0) {
-            libraryContent
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-            if store.currentSong != nil {
-                MiniPlayerView()
+        Group {
+            #if os(macOS)
+            VStack(spacing: 0) {
+                libraryContent
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                if store.currentSong != nil {
+                    MiniPlayerView()
+                }
             }
+            #else
+            libraryContent
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if store.currentSong != nil {
+                        MiniPlayerView()
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                    }
+                }
+            #endif
         }
         .background(Color(red: 22 / 255, green: 22 / 255, blue: 28 / 255).ignoresSafeArea())
         .preferredColorScheme(.dark)

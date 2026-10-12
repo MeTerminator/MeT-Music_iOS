@@ -35,6 +35,20 @@ struct MiniPlayerView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.white)
+            .miniPlayerSurface()
+            .onTapGesture { store.isPlayerPresented = true }
+            .accessibilityElement(children: .contain)
+            .accessibilityLabel("正在播放：\(song.name)，\(song.artistText)")
+            .sheet(isPresented: $showingQueue) { QueueView() }
+        }
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func miniPlayerSurface() -> some View {
+        #if os(macOS)
+        self
             .padding(.horizontal, 20)
             .frame(maxWidth: .infinity)
             .frame(height: 72)
@@ -43,12 +57,25 @@ struct MiniPlayerView: View {
                 Rectangle().fill(.white.opacity(0.1)).frame(height: 1)
             }
             .contentShape(Rectangle())
-            .onTapGesture { store.isPlayerPresented = true }
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("正在播放：\(song.name)，\(song.artistText)")
-            .sheet(isPresented: $showingQueue) { QueueView() }
+        #else
+        self
+            .padding(.horizontal, 12)
+            .frame(height: 60)
+            .transparentPlayerGlass()
+            .contentShape(RoundedRectangle(cornerRadius: 32))
+        #endif
+    }
+
+    #if os(iOS)
+    @ViewBuilder
+    func transparentPlayerGlass() -> some View {
+        if #available(iOS 26.0, *) {
+            glassEffect(.clear.interactive(), in: .rect(cornerRadius: 32))
+        } else {
+            background(.ultraThinMaterial.opacity(0.35), in: RoundedRectangle(cornerRadius: 32))
         }
     }
+    #endif
 }
 
 /// Keeps every player surface consistent while a song is being prepared.

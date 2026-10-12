@@ -112,7 +112,7 @@ actor CacheStore {
     /// A song that is already cached always plays from disk: a complete local
     /// file seeks exactly and needs no network. Otherwise standalone playback
     /// returns the network URL immediately and warms disk in the background,
-    /// while together playback waits for the complete file.
+    /// for both standalone and together playback.
     func audioURL(songID: String, remoteURL: URL, waitForCache: Bool) async throws -> URL {
         if let cached = cachedAudioURL(songID: songID) { return cached }
         if !waitForCache {

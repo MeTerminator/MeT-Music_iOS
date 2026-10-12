@@ -92,6 +92,34 @@ import Testing
         #expect(snapshot.scrollTargetIndex == 1)
     }
 
+    @Test func overlappingLyricsFollowRemainingFirstLineWhenUpperLineEnds() {
+        let timeline = LyricTimeline(bounds: [
+            .init(startTime: 0, endTime: 2_000),
+            .init(startTime: 1_000, endTime: 4_000),
+            .init(startTime: 1_500, endTime: 5_000),
+        ])
+        for time: Int64 in [0, 500, 1_000, 1_500, 1_900] {
+            #expect(timeline.sync(timeMs: time).scrollTargetIndex == 0)
+        }
+        let remaining = timeline.sync(timeMs: 2_000)
+        #expect(remaining.playingIndices == [1, 2])
+        #expect(remaining.scrollTargetIndex == 1)
+        for time: Int64 in [2_500, 3_000, 3_500, 4_000] {
+            _ = timeline.sync(timeMs: time)
+        }
+        #expect(timeline.sync(timeMs: 4_100).scrollTargetIndex == 2)
+    }
+
+    @Test @MainActor func lyricAnchorChecksDriftAndRespectsManualScrolling() {
+        let model = LyricsViewModel(groups: [], timeMs: 0)
+        model.anchorFrames = [0: CGRect(x: 0, y: 80, width: 300, height: 100)]
+        #expect(!model.anchorNeedsCorrection(index: 0, viewportHeight: 500, alignPosition: 0.2))
+        model.anchorFrames[0]?.origin.y = 120
+        #expect(model.anchorNeedsCorrection(index: 0, viewportHeight: 500, alignPosition: 0.2))
+        model.beginUserScroll()
+        #expect(!model.anchorNeedsCorrection(index: 0, viewportHeight: 500, alignPosition: 0.2))
+    }
+
     @Test func syllableChunksUseContinuousProgress() {
         let words = [
             LyricWord(startTime: 0, endTime: 300, word: "hel"),
@@ -348,6 +376,22 @@ import Testing
             await model.autoScrollTask?.value
         }
         #expect(visited == [0, 1, 2])
+    }
+
+    @Test @MainActor func lyricFollowCanCorrectTheSameTargetWithoutRepeatingSettledTicks() async {
+        let model = LyricsViewModel(groups: [], timeMs: 0)
+        var calls = 0
+        model.scheduleAutoScroll(index: 1) { calls += 1 }
+        await model.autoScrollTask?.value
+        model.scheduleAutoScroll(index: 1) { calls += 1 }
+        await model.autoScrollTask?.value
+        #expect(calls == 1)
+        model.scheduleAutoScroll(index: 1, force: true) { calls += 1 }
+        await model.autoScrollTask?.value
+        #expect(calls == 2)
+        model.anchorFrames = [1: CGRect(x: 0, y: 200, width: 300, height: 100)]
+        // Let the correction settle before considering another position check.
+        #expect(!model.anchorNeedsCorrection(index: 1, viewportHeight: 500, alignPosition: 0.2))
     }
 
     @Test @MainActor func lyricFollowRearmsAfterPageChangesAndManualScrolling() async {

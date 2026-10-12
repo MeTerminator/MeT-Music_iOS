@@ -207,7 +207,7 @@ struct PlayerView: View {
             Spacer(minLength: 0)
         }
         .frame(width: size.width, height: size.height)
-        .simultaneousGesture(dismissGesture(height: size.height))
+        .simultaneousGesture(dismissGesture(height: size.height), including: dismissGestureMask)
     }
 
     private var artworkBackground: some View {
@@ -250,7 +250,7 @@ struct PlayerView: View {
         .foregroundStyle(.white)
         .frame(width: size.width, height: size.height)
         .contentShape(Rectangle())
-        .simultaneousGesture(dismissGesture(height: size.height))
+        .simultaneousGesture(dismissGesture(height: size.height), including: dismissGestureMask)
     }
 
     private var songTitleBlock: some View {
@@ -269,11 +269,13 @@ struct PlayerView: View {
     @ViewBuilder
     private var playerHandle: some View {
         #if os(iOS)
-        HStack {
-            closeButton
-            Spacer()
-        }
-        .frame(height: 44)
+        Capsule()
+            .fill(.white.opacity(0.7))
+            .frame(width: 42, height: 5)
+            .frame(maxWidth: .infinity)
+            .frame(height: 32)
+            .contentShape(Rectangle())
+            .accessibilityHidden(true)
         #endif
     }
 
@@ -288,6 +290,14 @@ struct PlayerView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("关闭播放器")
+    }
+
+    private var dismissGestureMask: GestureMask {
+        #if os(iOS)
+        .all
+        #else
+        .none
+        #endif
     }
 
     private func dismissGesture(height: CGFloat) -> some Gesture {
@@ -333,7 +343,7 @@ struct PlayerView: View {
                 }
                 .frame(width: max(0, size.width - 48))
                 .contentShape(Rectangle())
-                .simultaneousGesture(dismissGesture(height: size.height))
+                .simultaneousGesture(dismissGesture(height: size.height), including: dismissGestureMask)
             }
             AppleMusicLyricsView(
                 lyricLines: store.lyrics,
@@ -481,45 +491,33 @@ struct PlayerView: View {
     private var progressSection: some View {
         GeometryReader { geometry in
             VStack(spacing: 5) {
-                if let download = store.precacheDownload {
-                    DownloadProgressBar(fraction: audioDownloadFraction(
-                        receivedBytes: download.receivedBytes,
-                        expectedBytes: download.expectedBytes
-                    ))
-                    .frame(width: geometry.size.width)
-                    Text(audioDownloadStatusText(download))
-                        .font(.caption2.monospacedDigit())
-                        .foregroundStyle(.white.opacity(0.5))
-                        .frame(width: geometry.size.width)
-                } else {
-                    PlayerScrubber(
-                        value: Binding(
-                            get: { displayedScrubValue },
-                            set: { model.scrubValue = $0 }
-                        ),
-                        upperBound: Double(max(store.audio.durationMs, store.currentSong?.durationMs ?? 1, 1))
-                    ) { editing in
-                        if editing {
-                            model.beginControlInteraction()
-                            model.scrubValue = Double(store.audio.positionMs)
-                        } else {
-                            model.endControlInteraction()
-                        }
-                        model.scrubbing = editing
-                        if !editing {
-                            Task { await store.seek(to: Int64(model.scrubValue.rounded())) }
-                        }
+                PlayerScrubber(
+                    value: Binding(
+                        get: { displayedScrubValue },
+                        set: { model.scrubValue = $0 }
+                    ),
+                    upperBound: Double(max(store.audio.durationMs, store.currentSong?.durationMs ?? 1, 1))
+                ) { editing in
+                    if editing {
+                        model.beginControlInteraction()
+                        model.scrubValue = Double(store.audio.positionMs)
+                    } else {
+                        model.endControlInteraction()
                     }
-                    .frame(width: geometry.size.width)
-                    HStack(spacing: 0) {
-                        Text(format(Int64(displayedScrubValue)))
-                            .frame(width: geometry.size.width / 2, alignment: .leading)
-                        Text(format(effectiveDuration))
-                            .frame(width: geometry.size.width / 2, alignment: .trailing)
+                    model.scrubbing = editing
+                    if !editing {
+                        Task { await store.seek(to: Int64(model.scrubValue.rounded())) }
                     }
-                    .font(.system(size: 12).monospacedDigit())
-                    .foregroundStyle(.white.opacity(0.5))
                 }
+                .frame(width: geometry.size.width)
+                HStack(spacing: 0) {
+                    Text(format(Int64(displayedScrubValue)))
+                        .frame(width: geometry.size.width / 2, alignment: .leading)
+                    Text(format(effectiveDuration))
+                        .frame(width: geometry.size.width / 2, alignment: .trailing)
+                }
+                .font(.system(size: 12).monospacedDigit())
+                .foregroundStyle(.white.opacity(0.5))
             }
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
@@ -620,39 +618,6 @@ struct PlayerView: View {
 
     private func format(_ milliseconds: Int64) -> String {
         String(format: "%lld:%02lld", milliseconds / 60_000, milliseconds / 1_000 % 60)
-    }
-}
-
-/// Replaces the playback scrubber while precache mode downloads the song. It
-/// deliberately keeps the scrubber's track geometry so the controls below do
-/// not shift when playback finally starts.
-private struct DownloadProgressBar: View {
-    let fraction: Double?
-
-    var body: some View {
-        GeometryReader { geometry in
-            Group {
-                if let fraction {
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(.white.opacity(0.24))
-                        Capsule()
-                            .fill(.white.opacity(0.86))
-                            .frame(width: geometry.size.width * min(max(fraction, 0), 1))
-                    }
-                    .animation(.easeOut(duration: 0.2), value: fraction)
-                } else {
-                    ProgressView()
-                        .progressViewStyle(.linear)
-                        .tint(.white.opacity(0.86))
-                }
-            }
-            .frame(height: 5)
-            .frame(maxHeight: .infinity)
-        }
-        .frame(height: 18)
-        .accessibilityElement()
-        .accessibilityLabel("下载中")
-        .accessibilityValue(fraction.map { "\(Int(($0 * 100).rounded()))%" } ?? "")
     }
 }
 

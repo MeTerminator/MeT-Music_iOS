@@ -86,51 +86,55 @@ struct PlaylistDetailView: View {
     @StateObject private var model = PlaylistDetailModel()
 
     var body: some View {
-        List {
-            Section {
-                VStack(spacing: 14) {
-                    ArtworkView(url: playlist.bestCoverURL, cornerRadius: 20).frame(width: 220, height: 220)
-                    Text(playlist.name).font(.title2.bold()).multilineTextAlignment(.center)
-                    if let creator = playlist.creator?.nickname { Text(creator).foregroundStyle(.pink) }
-                    Button {
-                        if !model.songs.isEmpty { store.playPlaylist(model.songs, from: 0) }
-                    } label: {
-                        HStack(spacing: 8) {
-                            Image(systemName: "play.fill")
-                            Text("播放")
+        GeometryReader { geometry in
+            List {
+                Section {
+                    VStack(spacing: 14) {
+                        ArtworkView(url: playlist.bestCoverURL, cornerRadius: 20).frame(width: 220, height: 220)
+                        Text(playlist.name).font(.title2.bold()).multilineTextAlignment(.center)
+                        if let creator = playlist.creator?.nickname { Text(creator).foregroundStyle(.pink) }
+                        Button {
+                            if !model.songs.isEmpty { store.playPlaylist(model.songs, from: 0) }
+                        } label: {
+                            HStack(spacing: 8) {
+                                Image(systemName: "play.fill")
+                                Text("播放")
+                            }
+                            .foregroundStyle(.white)
+                            .frame(width: geometry.size.width / 3, height: 54)
+                            .background(.pink, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity)
+                        .buttonStyle(.plain)
+                        .disabled(model.songs.isEmpty)
+
+                        Divider()
+                            .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.pink)
-                    .disabled(model.songs.isEmpty)
+                    .frame(maxWidth: .infinity)
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden, edges: .bottom)
 
-                    Divider()
-                        .frame(maxWidth: .infinity)
-                }
-                .frame(maxWidth: .infinity)
-                .listRowBackground(Color.clear)
-                .listRowSeparator(.hidden, edges: .bottom)
-
-                ForEach(Array(model.songs.enumerated()), id: \.element.id) { index, song in
-                    Button { store.playPlaylist(model.songs, from: index) } label: {
-                        SongRow(
-                            song: song,
-                            number: index + 1,
-                            active: store.currentSong?.id == song.id,
-                            hasTTML: song.hasTTML
-                        )
-                    }.buttonStyle(.plain)
+                    ForEach(Array(model.songs.enumerated()), id: \.element.id) { index, song in
+                        Button { store.playPlaylist(model.songs, from: index) } label: {
+                            SongRow(
+                                song: song,
+                                number: index + 1,
+                                active: store.currentSong?.id == song.id,
+                                hasTTML: song.hasTTML
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 16, bottom: 4, trailing: 16))
+                    }
                 }
             }
+            .listStyle(.inset)
+            .navigationTitle(playlist.name)
+            .musicNavigationBarHidden(false)
+            .task { model.songs = await store.tracks(for: playlist) }
+            .refreshable { model.songs = await store.tracks(for: playlist, refresh: true) }
+            .overlay { if store.loadingPlaylistIDs.contains(playlist.id) && model.songs.isEmpty { ProgressView().controlSize(.large) } }
         }
-        .listStyle(.inset)
-        .navigationTitle(playlist.name)
-        .musicNavigationBarHidden(false)
-        .task { model.songs = await store.tracks(for: playlist) }
-        .refreshable { model.songs = await store.tracks(for: playlist, refresh: true) }
-        .overlay { if store.loadingPlaylistIDs.contains(playlist.id) && model.songs.isEmpty { ProgressView().controlSize(.large) } }
     }
 }
 

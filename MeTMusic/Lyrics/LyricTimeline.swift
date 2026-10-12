@@ -60,6 +60,12 @@ public final class LyricTimeline {
                 cached.isSeeking = false
             }
         }
+        // An overlapping upper line can finish without another line starting.
+        // Follow the first line still playing even if highlights are held over.
+        if !seeking, let first = playing.min() {
+            scrollTarget = first
+            cached.scrollTargetIndex = first
+        }
         previousTime = timeMs
         if last == nil || seeking { cached = snapshot(seeking: seeking) }
         return cached
