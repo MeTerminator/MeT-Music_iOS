@@ -769,7 +769,7 @@ private struct LyricGroupView: View, Equatable {
     @State private var isVisible = true
 
     private var animatesWords: Bool {
-        active && isVisible && isPlaying && !reduceEffects && style.enableFrameInterpolation
+        !group.main.isLineTimed && active && isVisible && isPlaying && !reduceEffects && style.enableFrameInterpolation
     }
 
     var body: some View {
@@ -895,18 +895,25 @@ private struct LyricGroupView: View, Equatable {
                 forcedBreaks: chunks.map(\.forcesBreakAfter)
             ) {
                 ForEach(chunks) { chunk in
-                    TimedChunkView(
-                        chunk: chunk, progress: active ? lyricChunkProgress(words: chunk.words, timeMs: timeMs) : 0,
-                        emphasisProgress: active ? lyricEmphasisProgress(words: chunk.words, timeMs: timeMs) : 0,
-                        active: active, style: wordStyle,
-                        lift: active ? lyricWordLift(words: chunk.words, timeMs: timeMs - (rapidTransition ? 60 : 0)) : 0,
-                        effectsEnabled: !reduceEffects && !disableTransforms,
-                        backgroundVocal: line.isBackground,
-                        usesFrameClock: animatesWords,
-                        hasRubyLine: hasRuby, hasRomanLine: hasRoman
-                    )
-                    .equatable()
-                    .fixedSize(horizontal: false, vertical: true)
+                    if line.isLineTimed {
+                        Text(chunk.displayText)
+                            .font(.system(size: wordStyle.fontSize, weight: .bold, design: .default))
+                            .foregroundStyle(active ? style.activeColor : style.inactiveColor)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        TimedChunkView(
+                            chunk: chunk, progress: active ? lyricChunkProgress(words: chunk.words, timeMs: timeMs) : 0,
+                            emphasisProgress: active ? lyricEmphasisProgress(words: chunk.words, timeMs: timeMs) : 0,
+                            active: active, style: wordStyle,
+                            lift: active ? lyricWordLift(words: chunk.words, timeMs: timeMs - (rapidTransition ? 60 : 0)) : 0,
+                            effectsEnabled: !reduceEffects && !disableTransforms,
+                            backgroundVocal: line.isBackground,
+                            usesFrameClock: animatesWords,
+                            hasRubyLine: hasRuby, hasRomanLine: hasRoman
+                        )
+                        .equatable()
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
             if showTranslation, !line.translatedLyric.isEmpty {

@@ -51,6 +51,8 @@ public struct LyricLine: Hashable, Sendable, Identifiable {
     public var endTime: Int64
     public var isBackground: Bool
     public var isDuet: Bool
+    /// The source supplies line timestamps only; do not synthesize word progress.
+    public var isLineTimed: Bool
 
     public var text: String { words.map(\.word).joined() }
 
@@ -62,7 +64,8 @@ public struct LyricLine: Hashable, Sendable, Identifiable {
         startTime: Int64,
         endTime: Int64,
         isBackground: Bool = false,
-        isDuet: Bool = false
+        isDuet: Bool = false,
+        isLineTimed: Bool = false
     ) {
         self.id = id
         self.words = words
@@ -72,6 +75,7 @@ public struct LyricLine: Hashable, Sendable, Identifiable {
         self.endTime = endTime
         self.isBackground = isBackground
         self.isDuet = isDuet
+        self.isLineTimed = isLineTimed
     }
 }
 

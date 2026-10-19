@@ -47,7 +47,7 @@ enum OrdinaryLyricParser {
             let start = minute * 60_000 + second * 1_000 + milliseconds
             let text = decode(ns.substring(with: match.range(at: 4)).trimmingCharacters(in: .whitespaces))
             guard !text.isEmpty, !text.contains("纯音乐，请您欣赏") else { return nil }
-            return LyricLine(id: "lrc-\(index)-\(start)", words: [.init(startTime: start, endTime: start + 3_000, word: text)], startTime: start, endTime: start + 3_000)
+            return LyricLine(id: "lrc-\(index)-\(start)", words: [.init(startTime: start, endTime: start + 3_000, word: text)], startTime: start, endTime: start + 3_000, isLineTimed: true)
         }
         guard result.count > 1 else { return result }
         for index in 0..<(result.count - 1) {

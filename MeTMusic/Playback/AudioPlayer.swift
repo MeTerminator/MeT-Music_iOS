@@ -144,7 +144,7 @@ final class AudioPlayer: ObservableObject {
         }
         guard await configureAudioSession(request: request), request == generation else { return false }
         if url.isFileURL,
-           let loaded = loadFileEngine(
+           let loaded = await loadFileEngine(
                url: url,
                autoPlay: autoPlay,
                startPositionMs: startPositionMs,
@@ -388,12 +388,19 @@ final class AudioPlayer: ObservableObject {
         autoPlay: Bool,
         startPositionMs: Int64,
         request: Int
-    ) -> Bool? {
-        guard let file = try? AVAudioPlayer(contentsOf: url) else { return nil }
+    ) async -> Bool? {
+        // prepareToPlay also activates AVAudioSession internally. Even after
+        // explicit activation, file decoding and preparation must leave the UI
+        // thread free. Transfer the prepared, idle player back only once.
+        let prepared = await Task.detached(priority: .userInitiated) { () -> PreparedAudioFile? in
+            guard let file = try? AVAudioPlayer(contentsOf: url), file.prepareToPlay() else { return nil }
+            return PreparedAudioFile(player: file)
+        }.value
+        guard request == generation else { return false }
+        guard let file = prepared?.player else { return nil }
         player.replaceCurrentItem(with: nil)
         file.delegate = fileDelegate
         file.volume = volume
-        guard file.prepareToPlay() else { return nil }
         filePlayer = file
         durationMs = file.duration.isFinite ? Int64((file.duration * 1_000).rounded()) : 0
         isReady = true
@@ -563,6 +570,12 @@ final class AudioPlayer: ObservableObject {
         #endif
     }
 
+}
+
+/// One-way ownership transfer: the worker finishes all access before returning;
+/// after awaiting its task, only AudioPlayer's main actor uses this instance.
+private struct PreparedAudioFile: @unchecked Sendable {
+    let player: AVAudioPlayer
 }
 
 /// Bridges AVAudioPlayer's delegate callbacks onto the main actor.

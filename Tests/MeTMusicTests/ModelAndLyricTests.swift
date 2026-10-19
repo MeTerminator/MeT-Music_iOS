@@ -87,6 +87,26 @@ import Testing
         #expect(lines[0].translatedLyric == "你好")
     }
 
+    @Test func lrcPreservesAuthoredLineBoundariesAfterOptimization() {
+        let response = LyricResponse(
+            lrc: "[00:01.00]逐行歌词\n[00:03.500]Next line",
+            lrctrans: nil, qrc: nil, qrctrans: nil, qrcroma: nil
+        )
+        let lines = optimizeLyricLines(OrdinaryLyricParser.parse(response))
+        #expect(lines.allSatisfy { $0.isLineTimed })
+        #expect(lines.map(\.startTime) == [1_000, 3_500])
+        let timeline = LyricTimeline(lines: lines)
+        #expect(timeline.sync(timeMs: 999).playingIndices.isEmpty)
+        #expect(timeline.sync(timeMs: 1_000).playingIndices == [0])
+        #expect(timeline.sync(timeMs: 3_499).playingIndices == [0])
+        #expect(timeline.sync(timeMs: 3_500).playingIndices == [1])
+
+        let wordTimed = LyricLine(words: [.init(startTime: 1_000, endTime: 2_000, word: "Hello")],
+                                  startTime: 1_000, endTime: 2_000)
+        #expect(!wordTimed.isLineTimed)
+        #expect(optimizeLyricLines([wordTimed])[0].startTime == 400)
+    }
+
     @Test func qrcInformationRemovalMatchesUIBehavior() {
         let qrc = """
         [0,1000]歌名 - 歌手(0,1000)

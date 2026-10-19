@@ -87,7 +87,9 @@ public func optimizeLyricLines(
             let originalEnd = lines[index].endTime
             let advance: Int64 = !hasPrevious || originalStart >= previousEnd ? 600 : 400
             let boundary: Int64 = !hasPrevious ? 0 : (originalStart >= previousEnd ? groupEnd : previousStart + Int64(Double(previousEnd - previousStart) * 0.3))
-            lines[index].startTime = max(boundary, originalStart - advance)
+            if !lines[index].isLineTimed {
+                lines[index].startTime = max(boundary, originalStart - advance)
+            }
             if index + 1 < lines.count, lines[index + 1].isBackground { lines[index + 1].startTime = lines[index].startTime }
             if hasPrevious && originalStart < groupEnd && originalEnd > groupStart {
                 groupStart = min(groupStart, originalStart)

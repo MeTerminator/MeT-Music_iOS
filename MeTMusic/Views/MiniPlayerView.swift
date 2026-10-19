@@ -61,22 +61,33 @@ private extension View {
         self
             .padding(.horizontal, 12)
             .frame(height: 60)
-            .transparentPlayerGlass()
+            .background {
+                MiniPlayerGlassSurface().equatable()
+            }
             .contentShape(RoundedRectangle(cornerRadius: 32))
         #endif
     }
+}
 
-    #if os(iOS)
-    @ViewBuilder
-    func transparentPlayerGlass() -> some View {
+#if os(iOS)
+/// Keep the glass independent of artwork, loading and playback-clock updates.
+/// Its geometry follows the background proposal without rebuilding the effect
+/// whenever AppStore forwards an audio publication.
+private struct MiniPlayerGlassSurface: View, Equatable {
+    var body: some View {
         if #available(iOS 26.0, *) {
-            glassEffect(.clear.interactive(), in: .rect(cornerRadius: 32))
+            RoundedRectangle(cornerRadius: 32)
+                .fill(.clear)
+                .glassEffect(.clear, in: .rect(cornerRadius: 32))
+                .allowsHitTesting(false)
         } else {
-            background(.ultraThinMaterial.opacity(0.35), in: RoundedRectangle(cornerRadius: 32))
+            RoundedRectangle(cornerRadius: 32)
+                .fill(.ultraThinMaterial.opacity(0.35))
+                .allowsHitTesting(false)
         }
     }
-    #endif
 }
+#endif
 
 /// Keeps every player surface consistent while a song is being prepared.
 struct PlaybackButtonContent: View {
