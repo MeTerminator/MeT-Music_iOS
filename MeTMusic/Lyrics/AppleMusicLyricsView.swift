@@ -143,11 +143,8 @@ public struct AppleMusicLyricsView: View {
                             playbackRate: style.playbackRate,
                             discontinuityRevision: playbackDiscontinuityRevision
                         )
-                        let timelineTime = lyricTimelineTime(
-                            presentationTimeMs: time,
-                            lineTransitionLeadMs: lineTransitionLeadMs
-                        )
-                        let snapshot = model.sync(timeMs: timelineTime)
+                        let timelineTime = time
+                        let snapshot = model.sync(timeMs: timelineTime, lineTransitionLeadMs: lineTransitionLeadMs)
                         LazyVStack(spacing: style.lineSpacing) {
                             Color.clear.frame(height: geometry.size.height * style.alignPosition)
                             ForEach(groups.indices, id: \.self) { index in
@@ -329,10 +326,10 @@ public struct AppleMusicLyricsView: View {
                 .onChange(of: geometry.size) { _, newSize in
                     model.layoutDidChange()
                     guard lyricViewportIsUsable(newSize) else { return }
-                    let snapshot = model.sync(timeMs: lyricTimelineTime(
-                        presentationTimeMs: model.lastPresentationTimeMs,
+                    let snapshot = model.sync(
+                        timeMs: model.lastPresentationTimeMs,
                         lineTransitionLeadMs: lineTransitionLeadMs
-                    ))
+                    )
                     let index = snapshot.scrollTargetIndex
                     guard groups.indices.contains(index) else { return }
                     scrollImmediately(proxy: proxy, to: groups[index].id)
@@ -342,10 +339,10 @@ public struct AppleMusicLyricsView: View {
     }
 
     private func followCurrentLyrics(proxy: ScrollViewProxy, groups: [LyricGroup], viewport: CGSize) {
-        let snapshot = model.sync(timeMs: lyricTimelineTime(
-            presentationTimeMs: model.lastPresentationTimeMs,
+        let snapshot = model.sync(
+            timeMs: model.lastPresentationTimeMs,
             lineTransitionLeadMs: lineTransitionLeadMs
-        ))
+        )
         followLyrics(.init(
             index: snapshot.scrollTargetIndex,
             isSeeking: snapshot.isSeeking,
@@ -433,10 +430,10 @@ public struct AppleMusicLyricsView: View {
             try? await Task.sleep(for: style.userScrollResumeDelay)
             guard !Task.isCancelled else { return }
             withAnimation(.easeInOut(duration: 0.2)) { model.isUserScrolling = false }
-            let latest = model.sync(timeMs: lyricTimelineTime(
-                presentationTimeMs: model.lastPresentationTimeMs,
+            let latest = model.sync(
+                timeMs: model.lastPresentationTimeMs,
                 lineTransitionLeadMs: lineTransitionLeadMs
-            ))
+            )
             guard groups.indices.contains(latest.scrollTargetIndex) else { return }
             scroll(
                 proxy: proxy,
@@ -516,6 +513,7 @@ final class LyricsViewModel: ObservableObject {
     private var clockCalibrationTask: Task<Void, Never>?
     let timelineEpoch = Date()
     private var timeline: LyricTimeline
+    private var transitionLeadMs: Int64 = 0
     private var interpolator: PlaybackTimeInterpolator
     private(set) var lastPresentationTimeMs: Int64
     private(set) var sourceSignature: LyricSourceSignature?
@@ -533,7 +531,14 @@ final class LyricsViewModel: ObservableObject {
         lastPresentationTimeMs = timeMs
     }
 
-    func sync(timeMs: Int64) -> LyricTimelineSnapshot { timeline.sync(timeMs: timeMs) }
+    func sync(timeMs: Int64, lineTransitionLeadMs: Int64 = 0) -> LyricTimelineSnapshot {
+        let lead = max(0, lineTransitionLeadMs)
+        if lead != transitionLeadMs {
+            transitionLeadMs = lead
+            timeline = Self.makeTimeline(groups, lineTransitionLeadMs: lead)
+        }
+        return timeline.sync(timeMs: timeMs)
+    }
 
     func reset(groups: [LyricGroup], timeMs: Int64, sourceSignature: LyricSourceSignature) {
         cancelTasks()
@@ -542,7 +547,7 @@ final class LyricsViewModel: ObservableObject {
         self.groups = groups
         anchorFrames = [:]
         self.sourceSignature = sourceSignature
-        timeline = Self.makeTimeline(groups)
+        timeline = Self.makeTimeline(groups, lineTransitionLeadMs: transitionLeadMs)
         interpolator = .init(initialSourceTimeMs: timeMs)
         lastPresentationTimeMs = timeMs
         lastAutoScrollTarget = nil
@@ -664,8 +669,11 @@ final class LyricsViewModel: ObservableObject {
         return lastPresentationTimeMs
     }
 
-    private static func makeTimeline(_ groups: [LyricGroup]) -> LyricTimeline {
-        .init(bounds: groups.map { .init(startTime: $0.renderBounds.startTime, endTime: $0.renderBounds.endTime) })
+    private static func makeTimeline(_ groups: [LyricGroup], lineTransitionLeadMs: Int64 = 0) -> LyricTimeline {
+        .init(
+            bounds: groups.map { .init(startTime: $0.renderBounds.startTime, endTime: $0.renderBounds.endTime) },
+            lineTransitionLeadMs: lineTransitionLeadMs
+        )
     }
 
     deinit {
@@ -744,8 +752,11 @@ private struct LyricGroupView: View, Equatable {
         .foregroundStyle(highlighted ? style.activeColor : style.inactiveColor)
         .opacity(lyricLineOpacity(isHighlighted: highlighted))
         .scaleEffect(targetScale, anchor: group.main.isDuet ? .trailing : .leading)
-        .blur(radius: blurRadius)
-        .animation(disableTransforms || reduceEffects ? nil : .easeInOut(duration: 0.4), value: blurRadius)
+        // Focus changes precede the first sung word. Remove blur immediately
+        // on activation, independently of the line's scale/opacity animation.
+        .animation(active || highlighted || disableTransforms || reduceEffects ? nil : .easeInOut(duration: 0.4)) { content in
+            content.blur(radius: active || highlighted ? 0 : blurRadius)
+        }
         .animation(reduceEffects || disableTransforms ? nil : .spring(response: 0.55, dampingFraction: 0.9), value: targetScale)
         .animation(.easeInOut(duration: 0.4), value: highlighted)
         .animation(.easeOut(duration: 0.18), value: isUserScrolling)
@@ -836,6 +847,7 @@ private struct LyricGroupView: View, Equatable {
                 ForEach(chunks) { chunk in
                     TimedChunkView(
                         chunk: chunk, progress: active ? lyricChunkProgress(words: chunk.words, timeMs: timeMs) : 0,
+                        emphasisProgress: active ? lyricEmphasisProgress(words: chunk.words, timeMs: timeMs) : 0,
                         active: active, style: wordStyle,
                         lift: active ? lyricWordLift(words: chunk.words, timeMs: timeMs) : 0,
                         effectsEnabled: !reduceEffects && !disableTransforms,
@@ -916,6 +928,7 @@ private struct VerticalLyricRevealLayout: Layout {
 private struct TimedChunkView: View, Equatable {
     let chunk: LyricWordChunk
     let progress: CGFloat
+    let emphasisProgress: CGFloat
     let active: Bool
     let style: AppleMusicLyricsStyle
     let lift: Double
@@ -928,6 +941,7 @@ private struct TimedChunkView: View, Equatable {
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.chunk.id == rhs.chunk.id && lhs.progress == rhs.progress && lhs.active == rhs.active
+            && lhs.emphasisProgress == rhs.emphasisProgress
             && lhs.lift == rhs.lift && lhs.effectsEnabled == rhs.effectsEnabled
             && lhs.backgroundVocal == rhs.backgroundVocal
             && lhs.usesFrameClock == rhs.usesFrameClock
@@ -989,7 +1003,7 @@ private struct TimedChunkView: View, Equatable {
     }
 
     private func chunkText() -> some View {
-        ChunkText(text: chunk.displayText, characters: chunk.characters, progress: progress,
+        ChunkText(text: chunk.displayText, characters: chunk.characters, progress: emphasisProgress,
                   emphasize: chunk.emphasizes, amount: effectsEnabled ? chunk.emphasisAmount : 0, style: style)
     }
 }
@@ -1024,14 +1038,15 @@ private struct ChunkText: View {
 
     var body: some View {
         if emphasize {
-            HStack(alignment: .bottom, spacing: 0) {
+            let motions = characters.indices.map { index in
+                calculateEmphasisCharacterMotion(
+                    progress: progress, characterIndex: index,
+                    characterCount: characters.count, amount: amount
+                )
+            }
+            EmphasisGlyphLayout(scales: motions.map(\.scale)) {
                 ForEach(characters.indices, id: \.self) { index in
-                    let motion = calculateEmphasisCharacterMotion(
-                        progress: progress,
-                        characterIndex: index,
-                        characterCount: characters.count,
-                        amount: amount
-                    )
+                    let motion = motions[index]
                     Text(characters[index])
                         .font(.system(size: style.fontSize, weight: .bold, design: .default))
                         .scaleEffect(x: motion.scale, y: motion.verticalScale, anchor: .bottom)
@@ -1043,6 +1058,37 @@ private struct ChunkText: View {
             }
         } else {
             Text(text).font(.system(size: style.fontSize, weight: .bold, design: .default))
+        }
+    }
+}
+
+/// Transforms may expand into drawing bleed, but the line layout always sees
+/// the resting width. Both the dim glyphs and highlight use this same layout.
+private struct EmphasisGlyphLayout: Layout {
+    let scales: [Double]
+
+    func makeCache(subviews: Subviews) -> [CGSize] {
+        subviews.map { $0.sizeThatFits(.unspecified) }
+    }
+
+    func updateCache(_ cache: inout [CGSize], subviews: Subviews) {
+        cache = makeCache(subviews: subviews)
+    }
+
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout [CGSize]) -> CGSize {
+        CGSize(width: cache.reduce(0) { $0 + $1.width }, height: cache.map(\.height).max() ?? 0)
+    }
+
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout [CGSize]) {
+        let offsets = emphasisGlyphOffsets(widths: cache.map(\.width), scales: scales)
+        var x = bounds.minX
+        for index in subviews.indices {
+            let size = cache[index]
+            subviews[index].place(
+                at: CGPoint(x: x + offsets[index], y: bounds.maxY - size.height),
+                anchor: .topLeading, proposal: ProposedViewSize(size)
+            )
+            x += size.width
         }
     }
 }

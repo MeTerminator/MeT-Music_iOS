@@ -329,7 +329,7 @@ struct PlayerView: View {
                         lyricOffsetMs: store.lyricOffsetMs
                     )
                 },
-                lineTransitionLeadMs: store.lyricLeadMs,
+                lineTransitionLeadMs: store.effectiveLyricLeadMs,
                 playbackDiscontinuityRevision: store.audio.playbackDiscontinuityRevision,
                 isPlaying: store.audio.isPlaying,
                 isActive: compactChrome || model.page == 1,

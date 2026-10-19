@@ -37,13 +37,16 @@ final class AppStore: ObservableObject {
     @Published var currentIndex = -1
     @Published var currentSong: Song?
     @Published var lyrics: [LyricLine] = []
+    @Published private(set) var lyricFormat: LyricFormat = .lrc
+
+    var effectiveLyricLeadMs: Int64 { lyricFormat.transitionLeadMs(configuredMs: lyricLeadMs) }
     @Published var ttmlAuthor: String?
     @Published var isPlayerPresented = false
     @Published var playbackMode: PlaybackMode = .sequence
 
     @Published var soundQuality = "hq"
     @Published var lyricOffsetMs: Int64 = 0
-    @Published var lyricLeadMs: Int64 = 0
+    @Published var lyricLeadMs: Int64 = 100
     @Published var lyricFontSize: Double = 32
     @Published var translationFontSize: Double = 16
     @Published var removeQRCInformation = true
@@ -118,7 +121,7 @@ final class AppStore: ObservableObject {
         audio.stop()
         ["qq_id", "nickname", "avatar_url"].forEach(defaults.removeObject)
         isLoggedIn = false; qqID = ""; nickname = "未登录"; avatarURL = ""
-        playlists = []; playlistTracks = [:]; queue = []; currentIndex = -1; currentSong = nil; lyrics = []
+        playlists = []; playlistTracks = [:]; queue = []; currentIndex = -1; currentSong = nil; lyrics = []; lyricFormat = .lrc
         ttmlAuthor = nil
     }
 
@@ -331,7 +334,7 @@ final class AppStore: ObservableObject {
     private struct LyricLoadResult {
         var lines: [LyricLine]
         var author: String?
-        var hasTTML: Bool
+        var format: LyricFormat
     }
 
     private func loadOrdinaryLyricResult(for song: Song) async -> LyricLoadResult {
@@ -340,33 +343,35 @@ final class AppStore: ObservableObject {
             ordinary = try? await api.lyric(id: song.id)
             if let ordinary { try? await cache.saveLyric(ordinary, songID: song.id) }
         }
-        let fallback = ordinary.map { OrdinaryLyricParser.parse($0, removeQRCInformation: removeQRCInformation) } ?? []
-        return .init(lines: fallback, author: nil, hasTTML: false)
+        guard let ordinary else { return .init(lines: [], author: nil, format: .lrc) }
+        let parsed = OrdinaryLyricParser.parseWithFormat(ordinary, removeQRCInformation: removeQRCInformation, song: song)
+        return .init(lines: parsed.lines, author: nil, format: parsed.format)
     }
 
-    private func loadTTMLLyricResult(for song: Song, fallback: [LyricLine]) async -> LyricLoadResult {
+    private func loadTTMLLyricResult(for song: Song, fallback: LyricLoadResult) async -> LyricLoadResult {
         do {
             let response = try await api.ttml(mid: song.lyricMid)
             guard response.status == "success", let content = response.content, !content.isEmpty else {
-                return .init(lines: fallback, author: nil, hasTTML: false)
+                return fallback
             }
             let result = try TTMLParser.parseAMLL(content)
-            guard !result.lines.isEmpty else { return .init(lines: fallback, author: nil, hasTTML: false) }
+            guard !result.lines.isEmpty else { return fallback }
             let author = result.metadata["ttmlAuthorGithubLogin"]?
                 .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
                 .reduce(into: [String]()) { values, value in if !values.contains(value) { values.append(value) } }
                 .joined(separator: "、")
-            return .init(lines: result.lines, author: author?.isEmpty == false ? author : nil, hasTTML: true)
-        } catch { return .init(lines: fallback, author: nil, hasTTML: false) }
+            return .init(lines: result.lines, author: author?.isEmpty == false ? author : nil, format: .ttml)
+        } catch { return fallback }
     }
 
     private func loadLyricResult(for song: Song) async -> LyricLoadResult {
         let ordinary = await loadOrdinaryLyricResult(for: song)
-        return await loadTTMLLyricResult(for: song, fallback: ordinary.lines)
+        return await loadTTMLLyricResult(for: song, fallback: ordinary)
     }
 
     private func apply(_ result: LyricLoadResult, to song: Song) {
         guard currentSong?.id == song.id else { return }
+        lyricFormat = result.format
         lyrics = result.lines
         ttmlAuthor = result.author
         if let author = result.author { showToast("TTML 作者：\(author)") }
@@ -380,6 +385,7 @@ final class AppStore: ObservableObject {
         let generation = playbackGeneration
         audio.stop()
         lyrics = []
+        lyricFormat = .lrc
         ttmlAuthor = nil
         isResolvingPlayback = true
         let quality = soundQuality
@@ -409,7 +415,7 @@ final class AppStore: ObservableObject {
                 if let cover = song.bestCoverURL { Task { _ = try? await cache.coverData(remoteURL: cover) } }
                 let ordinary = await loadOrdinaryLyricResult(for: song)
                 apply(ordinary, to: song)
-                let ttml = await loadTTMLLyricResult(for: song, fallback: ordinary.lines)
+                let ttml = await loadTTMLLyricResult(for: song, fallback: ordinary)
                 apply(ttml, to: song)
                 try? await cache.saveSongMetadata(song, quality: quality)
                 savePlayback()
@@ -428,6 +434,7 @@ final class AppStore: ObservableObject {
         clearStandaloneStreamingSource()
         currentSong = song
         lyrics = []
+        lyricFormat = .lrc
         ttmlAuthor = nil
         audio.play(url: localURL, autoPlay: isPlaying, startPositionMs: positionMs)
         let lyricResult = await loadLyricResult(for: song)
@@ -487,7 +494,7 @@ final class AppStore: ObservableObject {
         soundQuality = defaults.string(forKey: "sound_quality") ?? "hq"
         playbackMode = PlaybackMode(rawValue: defaults.string(forKey: "playback_mode") ?? "") ?? .sequence
         lyricOffsetMs = Int64(defaults.integer(forKey: "lyric_offset"))
-        lyricLeadMs = defaults.object(forKey: "lyric_lead") == nil ? 0 : Int64(defaults.integer(forKey: "lyric_lead"))
+        lyricLeadMs = defaults.object(forKey: "lyric_lead") == nil ? 100 : Int64(defaults.integer(forKey: "lyric_lead"))
         lyricFontSize = defaults.object(forKey: "lyric_font_size") == nil ? 32 : defaults.double(forKey: "lyric_font_size")
         translationFontSize = defaults.object(forKey: "translation_font_size") == nil ? 16 : defaults.double(forKey: "translation_font_size")
         removeQRCInformation = defaults.object(forKey: "remove_qrc_song_info") == nil ? true : defaults.bool(forKey: "remove_qrc_song_info")

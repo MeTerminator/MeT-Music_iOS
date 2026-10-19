@@ -288,10 +288,62 @@ import Testing
         )
 
         #expect(presentationTime == 2_000)
-        #expect(lyricTimelineTime(
-            presentationTimeMs: presentationTime,
-            lineTransitionLeadMs: lead
-        ) == 2_300)
+        let timeline = LyricTimeline(bounds: [.init(startTime: 2_000, endTime: 2_600)], lineTransitionLeadMs: lead)
+        #expect(timeline.sync(timeMs: presentationTime).playingIndices == [0])
+        #expect(lyricChunkProgress(words: line.words, timeMs: presentationTime) == 0)
+    }
+
+    @Test func transitionLeadUsesOnlyTheGapAndPreservesLineEnds() {
+        let bounds: [LyricTimeBounds] = [
+            .init(startTime: 1_000, endTime: 4_000),
+            .init(startTime: 5_000, endTime: 6_900),
+            .init(startTime: 7_000, endTime: 9_000),
+            .init(startTime: 9_000, endTime: 10_000)
+        ]
+        let advanced = lyricTransitionBounds(bounds, lineTransitionLeadMs: 600)
+        #expect(advanced.map(\.startTime) == [400, 4_400, 6_900, 9_000])
+        #expect(advanced.map(\.endTime) == bounds.map(\.endTime))
+        let timeline = LyricTimeline(bounds: bounds, lineTransitionLeadMs: 600)
+        #expect(timeline.sync(timeMs: 3_999).playingIndices == [0])
+        #expect(timeline.sync(timeMs: 4_000).playingIndices.isEmpty)
+        #expect(timeline.sync(timeMs: 4_399).playingIndices.isEmpty)
+        let early = timeline.sync(timeMs: 4_400)
+        #expect(early.playingIndices == [1])
+        #expect(early.highlightedIndices == [1])
+        #expect(early.scrollTargetIndex == 1)
+        #expect(timeline.sync(timeMs: 6_899).playingIndices == [1])
+        #expect(timeline.sync(timeMs: 6_900).playingIndices == [2])
+        let word = LyricWord(startTime: 5_000, endTime: 6_900, word: "next")
+        #expect(lyricChunkProgress(words: [word], timeMs: 4_400) == 0)
+        #expect(lyricChunkProgress(words: [word], timeMs: 5_950) == 0.5)
+    }
+
+    @Test func transitionLeadPreservesOverlapsAndWaitsForOutstandingVocals() {
+        let bounds: [LyricTimeBounds] = [
+            .init(startTime: 1_000, endTime: 8_000),
+            .init(startTime: 3_000, endTime: 5_000),
+            .init(startTime: 8_200, endTime: 10_000)
+        ]
+        let advanced = lyricTransitionBounds(bounds, lineTransitionLeadMs: 600)
+        #expect(advanced.map(\.startTime) == [400, 3_000, 8_000])
+        #expect(lyricTransitionBounds(bounds, lineTransitionLeadMs: 0) == bounds)
+        #expect(lyricTransitionBounds(bounds, lineTransitionLeadMs: -100) == bounds)
+        #expect(lyricTransitionBounds([.init(startTime: 200, endTime: 1_000)], lineTransitionLeadMs: 600).first?.startTime == 0)
+    }
+
+    @Test @MainActor func transitionLeadCanChangeWithoutChangingTheWordClock() {
+        let group = LyricGroup(main: .init(
+            words: [.init(startTime: 5_000, endTime: 7_000, word: "next")],
+            startTime: 5_000, endTime: 7_000
+        ))
+        let model = LyricsViewModel(groups: [group], timeMs: 4_500)
+        #expect(model.sync(timeMs: 4_500).playingIndices.isEmpty)
+        #expect(model.sync(timeMs: 4_500, lineTransitionLeadMs: 600).playingIndices == [0])
+        #expect(model.lastPresentationTimeMs == 4_500)
+        #expect(model.sync(timeMs: 4_500, lineTransitionLeadMs: 0).playingIndices.isEmpty)
+        let timeline = LyricTimeline(bounds: [.init(startTime: 5_000, endTime: 7_000)], lineTransitionLeadMs: 600)
+        #expect(timeline.sync(timeMs: 4_500, forceSeek: true).playingIndices == [0])
+        #expect(timeline.sync(timeMs: 7_000, forceSeek: true).playingIndices.isEmpty)
     }
 
     @Test func singleTimedWordLineUsesNormalLineOpacity() {
@@ -367,6 +419,65 @@ import Testing
         #expect(lyricWordGlow(progress: 1, amount: 1) == 0)
         #expect(lyricWordGlow(progress: 0.5, amount: 1) == 0.65)
         #expect(lyricWordGlow(progress: 0.9999, amount: 1) < 0.000001)
+    }
+
+    @Test func heldEmphasisHasOverlappingCrestsAndContinuousFrameMotion() {
+        let widths: [CGFloat] = [31, 24, 22, 10, 25, 21] // Unequal advances in "chains".
+        let held = widths.indices.map {
+            calculateEmphasisCharacterMotion(progress: 0.5, characterIndex: $0, characterCount: widths.count, amount: 1)
+        }
+        #expect(held.allSatisfy { $0.wave > 0.9 })
+        var previous = widths.indices.map {
+            calculateEmphasisCharacterMotion(progress: 0, characterIndex: $0, characterCount: widths.count, amount: 1)
+        }
+        // A three-second note at 60 Hz: no abrupt change at attack/hold/release.
+        for frame in 1...180 {
+            let motions = widths.indices.map {
+                calculateEmphasisCharacterMotion(progress: Double(frame) / 180, characterIndex: $0, characterCount: widths.count, amount: 1)
+            }
+            for index in widths.indices {
+                #expect(abs(motions[index].verticalScale - previous[index].verticalScale) < 0.007)
+                #expect(motions[index].verticalScale >= 1)
+            }
+            previous = motions
+        }
+    }
+
+    @Test func emphasisExpansionPreservesGlyphEdgesAndWordCenter() {
+        let widths: [CGFloat] = [32, 10, 24, 12]
+        for frame in 0...120 {
+            let scales = widths.indices.map {
+                calculateEmphasisCharacterMotion(progress: Double(frame) / 120, characterIndex: $0, characterCount: widths.count, amount: 1.2).scale
+            }
+            let offsets = emphasisGlyphOffsets(widths: widths, scales: scales)
+            var x: CGFloat = 0
+            var previousRight: CGFloat?
+            var firstLeft: CGFloat = 0
+            for index in widths.indices {
+                let center = x + widths[index] / 2 + offsets[index]
+                let halfWidth = widths[index] * scales[index] / 2
+                let left = center - halfWidth
+                if let previousRight { #expect(abs(left - previousRight) < 0.000001) }
+                else { firstLeft = left }
+                previousRight = center + halfWidth
+                x += widths[index]
+            }
+            #expect(abs((firstLeft + (previousRight ?? 0)) / 2 - x / 2) < 0.000001)
+        }
+        #expect(emphasisGlyphOffsets(widths: widths, scales: [1, 1, 1, 1]) == [0, 0, 0, 0])
+    }
+
+    @Test func emphasisClockKeepsMovingBetweenSyllables() {
+        let words = [
+            LyricWord(startTime: 1_000, endTime: 1_500, word: "start"),
+            LyricWord(startTime: 2_500, endTime: 4_000, word: "ing")
+        ]
+        #expect(lyricChunkProgress(words: words, timeMs: 1_600) == lyricChunkProgress(words: words, timeMs: 2_400))
+        #expect(lyricEmphasisProgress(words: words, timeMs: 1_600) < lyricEmphasisProgress(words: words, timeMs: 2_400))
+        #expect(lyricEmphasisProgress(words: words, timeMs: 900) == 0)
+        #expect(lyricEmphasisProgress(words: words, timeMs: 4_100) == 1)
+        #expect(lyricEmphasisProgress(words: [], timeMs: 2_000) == 0)
+        #expect(lyricEmphasisProgress(words: [.init(startTime: 1_000, endTime: 1_000, word: "啊")], timeMs: 1_000) == 1)
     }
 
     @Test func lyricViewportRejectsTransientRotationSizes() {

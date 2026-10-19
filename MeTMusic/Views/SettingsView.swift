@@ -126,11 +126,15 @@ struct SettingsView: View {
       if shows(.lyrics) {
         Section("歌词") {
           Toggle(
-            "移除 QRC 歌曲信息行",
             isOn: Binding(
               get: { store.removeQRCInformation },
               set: store.setRemoveQRCInformation
-            ))
+            )) {
+            Text("移除 QRC 歌曲信息行")
+            Text("隐藏歌名、创作者、版权及推广信息，保留歌词正文。默认开启。")
+              .font(.caption)
+              .foregroundStyle(.secondary)
+          }
           Stepper(
             "时间偏移：\(store.lyricOffsetMs) ms",
             value: Binding(
@@ -140,7 +144,7 @@ struct SettingsView: View {
                 UserDefaults.standard.set(Int($0), forKey: "lyric_offset")
               }), in: -3_000...3_000, step: 50)
           Stepper(
-            "提前步进：\(store.lyricLeadMs) ms",
+            "QRC 提前步进：\(store.lyricLeadMs) ms",
             value: Binding(
               get: { store.lyricLeadMs },
               set: {

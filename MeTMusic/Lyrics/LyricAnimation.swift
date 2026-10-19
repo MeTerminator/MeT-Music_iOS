@@ -16,9 +16,20 @@ public func lyricPresentationTime(mediaPositionMs: Int64, lyricOffsetMs: Int64) 
     mediaPositionMs + lyricOffsetMs
 }
 
-/// The separate clock used only to anticipate active-line changes and scrolling.
-public func lyricTimelineTime(presentationTimeMs: Int64, lineTransitionLeadMs: Int64) -> Int64 {
-    presentationTimeMs + lineTransitionLeadMs
+/// Anticipation changes activation starts, never the clock or line ends.
+/// Spend only the silent gap before a line; authored overlapping vocals keep
+/// their original start instead of being delayed or advanced further.
+func lyricTransitionBounds(_ bounds: [LyricTimeBounds], lineTransitionLeadMs: Int64) -> [LyricTimeBounds] {
+    let lead = max(0, lineTransitionLeadMs)
+    guard lead > 0 else { return bounds }
+    var previousEnd: Int64 = 0
+    return bounds.map { bound in
+        defer { previousEnd = max(previousEnd, bound.endTime) }
+        return .init(
+            startTime: min(bound.startTime, max(previousEnd, bound.startTime - lead)),
+            endTime: bound.endTime
+        )
+    }
 }
 
 /// Line opacity depends on playback emphasis, never on the number of timed
@@ -163,11 +174,9 @@ public struct LyricRenderBounds: Hashable, Sendable {
 /// The window a lyric occupies on screen.
 ///
 /// The start is the first word actually sung, never `line.startTime`: the
-/// optimizer moves that up to 600 ms earlier for visual anticipation, and the
-/// view already anticipates line changes by `lineTransitionLeadMs` on top. Both
-/// together lit a lyric up almost a second before it was sung, which reads as
-/// lyrics running ahead of the audio. Anticipation now comes from the lead
-/// alone, which is a setting the listener controls.
+/// optimizer moves that up to 600 ms earlier for visual anticipation. Keep
+/// these authored bounds intact; `lyricTransitionBounds` separately advances
+/// activation by the listener's lead setting, bounded by prior vocal endings.
 ///
 /// The end still spans everything the line covers, so trailing words and an
 /// attached background vocal keep the lyric on screen until they finish.
@@ -237,20 +246,48 @@ public func calculateEmphasisCharacterMotion(
 ) -> EmphasisCharacterMotion {
     let count = max(characterCount, 1)
     let ratio = count == 1 ? 0 : Double(min(max(characterIndex, 0), count - 1)) / Double(count - 1)
-    let local = min(max((min(max(progress, 0), 1) - ratio * 0.4) / 0.6, 0), 1)
-    // Ease into and out of the wave with zero endpoint velocity. A plain
-    // sine started/stopped abruptly, especially on the delayed last glyph.
-    let wave = local > 0 && local < 1 ? pow(sin(local * .pi), 2) : 0
+    // Overlap the crests: the reference holds a long note as one elastic
+    // word, rather than sending a narrow bump through isolated letters.
+    let local = min(max((min(max(progress, 0), 1) - ratio * 0.22) / 0.78, 0), 1)
+    func smoothstep(_ value: Double) -> Double {
+        let x = min(max(value, 0), 1)
+        return x * x * x * (x * (x * 6 - 15) + 10)
+    }
+    // A slower release keeps the last letters from snapping down. Quintic
+    // easing has zero velocity and acceleration at every phase boundary.
+    let wave = smoothstep(local / 0.38) * (1 - smoothstep((local - 0.58) / 0.42))
     guard wave > 0 else { return .init(wave: 0, scale: 1, translationXEm: 0, translationYEm: 0) }
     let strength = min(max(amount, 0), 1.2)
-    let centerOffset = Double(count - 1) * 0.5 - Double(characterIndex)
     return .init(
         wave: wave,
-        scale: 1 + wave * 0.1 * strength,
-        verticalScale: 1 + wave * 0.13 * strength,
-        translationXEm: -wave * 0.015 * strength * centerOffset,
-        translationYEm: -wave * 0.05 * strength
+        scale: 1 + wave * 0.065 * strength,
+        verticalScale: 1 + wave * 0.18 * strength,
+        // Horizontal expansion is resolved using actual glyph advances by
+        // EmphasisGlyphLayout, so wide and narrow letters keep their spacing.
+        translationXEm: 0,
+        translationYEm: -wave * 0.035 * strength
     )
+}
+
+/// Offsets for center-anchored glyph scales, keeping the expanded word centered
+/// without changing the measured word width or triggering lyric rewrapping.
+func emphasisGlyphOffsets(widths: [CGFloat], scales: [Double]) -> [CGFloat] {
+    guard widths.count == scales.count else { return Array(repeating: 0, count: widths.count) }
+    let growth = zip(widths, scales).map { max(0, $0.0) * CGFloat($0.1 - 1) }
+    let halfGrowth = growth.reduce(0, +) / 2
+    var preceding: CGFloat = 0
+    return growth.map { extra in
+        defer { preceding += extra }
+        return preceding + extra / 2 - halfGrowth
+    }
+}
+
+/// Geometry follows elapsed note time. The highlight uses weighted syllable
+/// progress instead, which can pause in gaps between timed syllables.
+func lyricEmphasisProgress(words: [LyricWord], timeMs: Int64) -> CGFloat {
+    guard let first = words.first, let last = words.last else { return 0 }
+    guard last.endTime > first.startTime else { return timeMs >= first.startTime ? 1 : 0 }
+    return min(max(CGFloat(timeMs - first.startTime) / CGFloat(last.endTime - first.startTime), 0), 1)
 }
 
 /// Float has its own clock: short syllables should not jump upward just

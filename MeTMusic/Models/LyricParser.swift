@@ -1,27 +1,30 @@
 import Foundation
 
+enum LyricFormat {
+    case lrc, qrc, ttml
+
+    func transitionLeadMs(configuredMs: Int64) -> Int64 {
+        self == .qrc ? configuredMs : 0
+    }
+}
+
 enum OrdinaryLyricParser {
-    static func parse(_ response: LyricResponse, removeQRCInformation: Bool = true) -> [LyricLine] {
+    static func parse(_ response: LyricResponse, removeQRCInformation: Bool = true, song: Song? = nil) -> [LyricLine] {
+        parseWithFormat(response, removeQRCInformation: removeQRCInformation, song: song).lines
+    }
+
+    static func parseWithFormat(_ response: LyricResponse, removeQRCInformation: Bool = true, song: Song? = nil) -> (lines: [LyricLine], format: LyricFormat) {
         if let qrc = response.qrc, !qrc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let parsed = parseQRC(qrc)
-            let lines = removeQRCInformation ? removeInformationLines(parsed) : parsed
-            if !lines.isEmpty {
-                return align(align(lines, source: response.qrctrans ?? response.lrctrans, roman: false), source: response.qrcroma, roman: true)
+            let lines = removeQRCInformation ? QRCInformationFilter.remove(from: parsed, song: song) : parsed
+            // An all-metadata QRC is a valid empty result. Falling back to LRC
+            // here would reintroduce the information the listener just hid.
+            if !parsed.isEmpty {
+                return (align(align(lines, source: response.qrctrans ?? response.lrctrans, roman: false), source: response.qrcroma, roman: true), .qrc)
             }
         }
-        if let lrc = response.lrc { return align(parseLRC(lrc), source: response.lrctrans, roman: false) }
-        return []
-    }
-
-    private static func removeInformationLines(_ lines: [LyricLine]) -> [LyricLine] {
-        guard !lines.isEmpty else { return [] }
-        return Array(lines.dropFirst().drop(while: isInformationLine))
-    }
-
-    private static func isInformationLine(_ line: LyricLine) -> Bool {
-        guard line.text.contains(":") || line.text.contains("："),
-              let duration = line.words.first.map({ $0.endTime - $0.startTime }) else { return false }
-        return line.words.allSatisfy { $0.endTime - $0.startTime == duration }
+        if let lrc = response.lrc { return (align(parseLRC(lrc), source: response.lrctrans, roman: false), .lrc) }
+        return ([], .lrc)
     }
 
     private static func parseLRC(_ source: String) -> [LyricLine] {
@@ -94,4 +97,115 @@ enum OrdinaryLyricParser {
             .replacingOccurrences(of: "&#39;", with: "'")
             .replacingOccurrences(of: "&amp;", with: "&")
     }
+}
+
+/// Matches the UI project's QRC metadata rules without using word-duration
+/// equality as a heuristic. Source: MeT-Music_UI, commit 02e8fd2c98d164aad0484b80691ce4050808811e,
+/// packages/core/src/lyrics/{parse,song-info}.ts.
+private enum QRCInformationFilter {
+    static func remove(from lines: [LyricLine], song: Song?) -> [LyricLine] {
+        let firstContent = lines.firstIndex { !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let names = ([song?.name ?? ""] + (song?.artists.map(\.name) ?? []))
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        let artists = (song?.artists.map(\.name) ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        return lines.enumerated().compactMap { index, line in
+            let text = line.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let title = index == firstContent && (
+                (text.contains("-") && names.contains { text.contains($0) })
+                || (line.startTime == 0 && matches(#"\s-\s"#, text))
+            )
+            let artistLabel = (text.hasSuffix(":") || text.hasSuffix("："))
+                && artists.contains { text.contains($0) }
+            let plan = text.contains("计划") && ["酷狗", "音乐人", "QQ音乐"].contains { text.contains($0) }
+            let untimed = line.startTime == 0 && line.endTime == 0
+                && line.words.allSatisfy { $0.startTime == $0.endTime }
+            let metadata = title || artistLabel || plan || untimed || isCreditHeader(text)
+                || matches(#"未[经經].*[许許]可.*(?:不得|禁止)"#, text)
+                || matches(#"by[:：]"#, text, options: .caseInsensitive)
+            return metadata ? nil : line
+        }
+    }
+
+    private static func matches(_ pattern: String, _ text: String, options: String.CompareOptions = []) -> Bool {
+        text.range(of: pattern, options: options.union(.regularExpression)) != nil
+    }
+
+    /// Recognize complete role headers, including bilingual combinations and
+    /// suffixes. Position states avoid exponential regex backtracking on long
+    /// repeated headers; ordinary text before a colon must match in full.
+    private static func isCreditHeader(_ text: String) -> Bool {
+        guard let colon = text.firstIndex(where: { $0 == ":" || $0 == "：" }) else { return false }
+        let head = Array(text[..<colon].trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
+        let count = head.count
+        guard count > 0 else { return false }
+        var unitStart = Array(repeating: false, count: count + 1)
+        var afterPrefix = unitStart
+        var afterRole = unitStart
+        unitStart[0] = true
+        func advance(_ index: Int, tokens: [[Character]], into states: inout [Bool]) {
+            for token in tokens where head[index...].starts(with: token) {
+                states[index + token.count] = true
+            }
+        }
+        for index in 0...count {
+            if afterRole[index] {
+                if index == count { return true }
+                advance(index, tokens: suffixes, into: &afterRole)
+                var next = index
+                while next < count && head[next].isWhitespace { next += 1 }
+                if next < count && "/／&".contains(head[next]) {
+                    next += 1
+                    while next < count && head[next].isWhitespace { next += 1 }
+                }
+                unitStart[index] = true
+                unitStart[next] = true
+            }
+            if unitStart[index] { advance(index, tokens: prefixes, into: &afterPrefix) }
+            if unitStart[index] || afterPrefix[index] { advance(index, tokens: roles, into: &afterRole) }
+        }
+        return false
+    }
+
+    private static let roles: [[Character]] = [
+        "作词", "作曲", "说唱作曲", "原唱", "中文填词", "说唱填词",
+        "填词", "改编词", "词曲", "作词作曲", "填詞", "中文填詞",
+        "词", "曲", "原", "作詞", "詞", "总制作人",
+        "联合制作人", "音乐制作", "监制", "音乐总监", "项目总监", "营销推广",
+        "编曲", "編曲", "制作", "總製作人", "聯合製作人", "製作",
+        "音樂製作", "監製", "混音", "母带", "和声", "和音",
+        "配唱", "人声", "录音勤务", "录音", "声乐指导", "配乐",
+        "音频编辑", "剪辑", "音乐编辑", "母帶", "錄音", "剪輯",
+        "和聲", "器乐团队", "戏曲", "引用", "乐队", "吉他",
+        "贝斯", "鼓", "键盘", "弦乐", "管乐", "打击乐",
+        "演唱", "合唱", "貝斯", "鍵盤", "弦樂", "出品",
+        "特别鸣谢", "歌曲营销", "策划", "策劃", "运营", "運營",
+        "推广", "推廣", "项目企划", "企划", "统筹", "总监",
+        "總監", "版权", "版權", "发行", "商务", "营销",
+        "宣传", "發行", "企劃", "統籌", "OP", "SP",
+        "Lyrics", "Lyricist", "Lyrics by", "Written by", "Words by", "Music",
+        "Music by", "Composer", "Composed by", "Arranger", "Arranged by", "Arrangement",
+        "Producer", "Produced by", "Executive Producer", "Co-Producer", "Mixing", "Mixed by",
+        "Mixing Engineer", "Mastering", "Mastered by", "Mastering Engineer", "Recording", "Recorded by",
+        "Recording Engineer", "Vocal Director", "Backing Vocals", "Vocal", "Vocals", "Backing Vocal",
+        "Crowd Vocals", "Studio", "Guitar", "Bass", "Drums", "Keyboard",
+        "Piano", "Strings", "Programming", "Publisher", "Label", "Coordinator"
+    ].map { Array($0.lowercased()) }
+
+    private static let prefixes: [[Character]] = [
+        "音频", "音頻", "总", "總", "大", "联合",
+        "聯合", "共同", "执行", "執行", "项目", "項目",
+        "艺术", "藝術", "音乐", "音樂", "人声", "人聲",
+        "弦乐", "弦樂", "乐队", "樂隊", "和声", "和聲",
+        "歌曲", "版权", "版權", "宣传", "宣傳"
+    ].map { Array($0.lowercased()) }
+
+    private static let suffixes: [[Character]] = [
+        "师", "師", "工程师", "工程師", "管理", "后期",
+        "後期", "室", "棚", "助理", "统筹", "統籌",
+        "处理", "處理", "录音", "錄音", "编写", "編寫",
+        "指导", "指導", "协力", "協力", "总监", "總監",
+        "监制", "監製", "编辑", "編輯", "策划", "策劃",
+        "企划", "企劃", "人", "方"
+    ].map { Array($0.lowercased()) }
 }
