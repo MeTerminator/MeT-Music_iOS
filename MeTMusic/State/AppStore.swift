@@ -24,6 +24,11 @@ enum PlaybackMode: String, CaseIterable, Codable, Identifiable {
 
 @MainActor
 final class AppStore: ObservableObject {
+    @Published var selectedPlatform: MusicPlatform = .qq
+    @Published var accountIDs: [MusicPlatform: String] = [:]
+    @Published var neteaseQuality = "exhigh"
+    private var accountRequest = 0
+    func quality(for song: Song) -> String { song.source == .netease ? neteaseQuality : soundQuality }
     @Published var isLoggedIn = false
     @Published var qqID = ""
     @Published var nickname = "未登录"
@@ -78,6 +83,7 @@ final class AppStore: ObservableObject {
         restorePlayback()
         bindPlayer()
         _ = nowPlaying
+        if qqID.isEmpty, accountIDs[.netease] != nil { selectPlatform(.netease) }
         if !qqID.isEmpty {
             isLoggedIn = true
             Task { await loadUserPlaylists() }
@@ -85,76 +91,91 @@ final class AppStore: ObservableObject {
         Task { await refreshCacheSizes() }
     }
 
-    func login(qq: String) async -> Bool {
-        let value = qq.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !value.isEmpty else { showToast("请输入 QQ 号"); return false }
-        loadingPlaylists = true
-        defer { loadingPlaylists = false }
+    func selectPlatform(_ platform: MusicPlatform) {
+        accountRequest += 1
+        selectedPlatform = platform
+        qqID = accountIDs[platform] ?? ""
+        isLoggedIn = !qqID.isEmpty
+        nickname = defaults.string(forKey: "\(platform.rawValue)_nickname") ?? (qqID.isEmpty ? "未登录" : qqID)
+        avatarURL = defaults.string(forKey: "\(platform.rawValue)_avatar") ?? ""
+        playlists = []
+        loadingPlaylists = false
+        Task { await loadUserPlaylists() }
+    }
+
+    func login(qq: String) async -> Bool { await login(uid: qq, platform: selectedPlatform) }
+
+    func login(uid: String, platform: MusicPlatform) async -> Bool {
+        let value = uid.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, value.allSatisfy({ $0.isASCII && $0.isNumber }) else {
+            showToast("请输入有效的数字用户 ID"); return false
+        }
         do {
-            let response = try await api.userPlaylists(uid: value)
-            guard !response.playlist.isEmpty else { showToast("没有找到该用户的歌单"); return false }
-            try? await cache.savePlaylists(response.playlist, uid: value)
-            qqID = value
-            nickname = response.username ?? value
-            avatarURL = response.avatarUrl ?? ""
-            playlists = response.playlist
-            isLoggedIn = true
-            persistUser()
+            let response = try await api.userPlaylists(uid: value, platform: platform)
+            guard (response.code ?? 200) == 200, response.username?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false else {
+                showToast("没有找到该用户的公开资料和歌单"); return false
+            }
+            let lists = response.playlist.map { var list = $0; list.source = platform; return list }
+            try? await cache.savePlaylists(lists, uid: platform.key(value))
+            defaults.set(value, forKey: platform == .qq ? "qq_id" : "netease_id")
+            defaults.set(response.username ?? value, forKey: "\(platform.rawValue)_nickname")
+            defaults.set(response.avatarUrl ?? "", forKey: "\(platform.rawValue)_avatar")
+            accountIDs[platform] = value
+            selectPlatform(platform)
             showToast("登录成功")
             return true
         } catch {
-            if let cached = await cache.playlists(uid: value) {
-                qqID = value; playlists = cached; nickname = defaults.string(forKey: "nickname") ?? value
-                avatarURL = defaults.string(forKey: "avatar_url") ?? ""; isLoggedIn = true; persistUser()
-                showToast("网络不可用，已载入缓存歌单")
-                return true
-            }
             showToast("登录失败：\(error.localizedDescription)")
             return false
         }
     }
 
-    func logout() {
-        together.leaveRoom()
-        playbackGeneration += 1
-        clearStandaloneStreamingSource()
-        audio.stop()
-        ["qq_id", "nickname", "avatar_url"].forEach(defaults.removeObject)
-        isLoggedIn = false; qqID = ""; nickname = "未登录"; avatarURL = ""
-        playlists = []; playlistTracks = [:]; queue = []; currentIndex = -1; currentSong = nil; lyrics = []; lyricFormat = .lrc
-        ttmlAuthor = nil
+    func logout() { logout(platform: selectedPlatform) }
+    func logout(platform: MusicPlatform) {
+        defaults.removeObject(forKey: platform == .qq ? "qq_id" : "netease_id")
+        defaults.removeObject(forKey: "\(platform.rawValue)_nickname")
+        defaults.removeObject(forKey: "\(platform.rawValue)_avatar")
+        accountIDs[platform] = nil
+        if selectedPlatform == platform { selectPlatform(platform) }
     }
 
     func loadUserPlaylists() async {
-        guard !qqID.isEmpty else { return }
+        let platform = selectedPlatform
+        let uid = qqID
+        guard !uid.isEmpty else { return }
+        accountRequest += 1
+        let request = accountRequest
         loadingPlaylists = true
-        if let cached = await cache.playlists(uid: qqID) { playlists = cached }
-        do {
-            let response = try await api.userPlaylists(uid: qqID)
-            playlists = response.playlist
-            nickname = response.username ?? nickname
-            avatarURL = response.avatarUrl ?? avatarURL
-            try? await cache.savePlaylists(playlists, uid: qqID)
-            persistUser()
-        } catch {
-            if playlists.isEmpty { showToast("载入歌单失败：\(error.localizedDescription)") }
+        defer { if request == accountRequest { loadingPlaylists = false } }
+        if let cached = await cache.playlists(uid: platform.key(uid)), request == accountRequest {
+            playlists = cached.map { var list = $0; list.source = platform; return list }
         }
-        loadingPlaylists = false
+        do {
+            let response = try await api.userPlaylists(uid: uid, platform: platform)
+            let lists = response.playlist.map { var list = $0; list.source = platform; return list }
+            try? await cache.savePlaylists(lists, uid: platform.key(uid))
+            guard request == accountRequest else { return }
+            playlists = lists
+            nickname = response.username ?? uid
+            avatarURL = response.avatarUrl ?? ""
+        } catch {
+            if request == accountRequest, playlists.isEmpty { showToast("载入歌单失败：\(error.localizedDescription)") }
+        }
     }
 
     func tracks(for playlist: Playlist, refresh: Bool = false) async -> [Song] {
-        if !refresh, let existing = playlistTracks[playlist.id] { return existing }
-        loadingPlaylistIDs.insert(playlist.id)
-        defer { loadingPlaylistIDs.remove(playlist.id) }
-        if !refresh, let cached = await cache.tracks(playlistID: playlist.id) { playlistTracks[playlist.id] = cached }
+        if !refresh, let existing = playlistTracks[playlist.cacheKey] { return existing }
+        loadingPlaylistIDs.insert(playlist.cacheKey)
+        defer { loadingPlaylistIDs.remove(playlist.cacheKey) }
+        if !refresh, let cached = await cache.tracks(playlistID: playlist.cacheKey) { playlistTracks[playlist.cacheKey] = cached }
         do {
-            let response = try await api.playlistTracks(id: playlist.id)
-            playlistTracks[playlist.id] = response.songs
-            try? await cache.saveTracks(response.songs, playlistID: playlist.id)
+            let response = try await api.playlistTracks(id: playlist.id, platform: playlist.source)
+            playlistTracks[playlist.cacheKey] = response.songs.map { var song = $0; song.source = playlist.source; return song }
+            try? await cache.saveTracks(playlistTracks[playlist.cacheKey] ?? [], playlistID: playlist.cacheKey)
         } catch {
-            if playlistTracks[playlist.id] == nil { showToast("载入歌曲失败：\(error.localizedDescription)") }
+            if playlistTracks[playlist.cacheKey] == nil { showToast("载入歌曲失败：\(error.localizedDescription)") }
         }
-        return playlistTracks[playlist.id] ?? []
+        return playlistTracks[playlist.cacheKey] ?? []
     }
 
     func playPlaylist(_ songs: [Song], from index: Int) {
@@ -291,11 +312,12 @@ final class AppStore: ObservableObject {
         setPlaybackMode(modes[(modes.firstIndex(of: playbackMode)! + 1) % modes.count])
     }
 
-    func setQuality(_ quality: String) {
+    func setQuality(_ quality: String) { setQuality(quality, platform: .qq) }
+    func setQuality(_ quality: String, platform: MusicPlatform) {
         let position = audio.positionMs
-        soundQuality = quality
-        defaults.set(quality, forKey: "sound_quality")
-        if let currentSong, !together.isInRoom { startStandalone(currentSong, startPositionMs: position) }
+        if platform == .qq { soundQuality = quality } else { neteaseQuality = quality }
+        defaults.set(quality, forKey: platform == .qq ? "sound_quality" : "netease_sound_quality")
+        if let currentSong, currentSong.source == platform, !together.isInRoom { startStandalone(currentSong, startPositionMs: position) }
     }
 
     func refreshCacheSizes() async {
@@ -338,10 +360,10 @@ final class AppStore: ObservableObject {
     }
 
     private func loadOrdinaryLyricResult(for song: Song) async -> LyricLoadResult {
-        var ordinary = await cache.lyric(songID: song.id)
+        var ordinary = await cache.lyric(songID: song.cacheKey)
         if ordinary == nil {
-            ordinary = try? await api.lyric(id: song.id)
-            if let ordinary { try? await cache.saveLyric(ordinary, songID: song.id) }
+            ordinary = try? await api.lyric(id: song.id, platform: song.source)
+            if let ordinary { try? await cache.saveLyric(ordinary, songID: song.cacheKey) }
         }
         guard let ordinary else { return .init(lines: [], author: nil, format: .lrc) }
         let parsed = OrdinaryLyricParser.parseWithFormat(ordinary, removeQRCInformation: removeQRCInformation, song: song)
@@ -350,7 +372,7 @@ final class AppStore: ObservableObject {
 
     private func loadTTMLLyricResult(for song: Song, fallback: LyricLoadResult) async -> LyricLoadResult {
         do {
-            let response = try await api.ttml(mid: song.lyricMid)
+            let response = try await api.ttml(mid: song.lyricMid, platform: song.source)
             guard response.status == "success", let content = response.content, !content.isEmpty else {
                 return fallback
             }
@@ -370,7 +392,7 @@ final class AppStore: ObservableObject {
     }
 
     private func apply(_ result: LyricLoadResult, to song: Song) {
-        guard currentSong?.id == song.id else { return }
+        guard currentSong?.cacheKey == song.cacheKey else { return }
         lyricFormat = result.format
         lyrics = result.lines
         ttmlAuthor = result.author
@@ -388,27 +410,27 @@ final class AppStore: ObservableObject {
         lyricFormat = .lrc
         ttmlAuthor = nil
         isResolvingPlayback = true
-        let quality = soundQuality
+        let quality = self.quality(for: song)
         Task {
             defer {
                 if generation == playbackGeneration { isResolvingPlayback = false }
             }
             do {
                 let playbackURL: URL
-                if let cached = await cache.cachedAudioURL(songID: song.id) {
+                if let cached = await cache.cachedAudioURL(songID: song.audioKey(quality)) {
                     playbackURL = cached
                 } else {
                     let remote: URL
-                    if let cached = await cache.remoteURL(songID: song.id, quality: quality) { remote = cached }
-                    else { remote = try await api.songURL(id: song.id, quality: quality) }
-                    await cache.setRemoteURL(remote, songID: song.id, quality: quality)
+                    if let cached = await cache.remoteURL(songID: song.cacheKey, quality: quality) { remote = cached }
+                    else { remote = try await api.songURL(id: song.id, quality: quality, platform: song.source) }
+                    await cache.setRemoteURL(remote, songID: song.cacheKey, quality: quality)
                     playbackURL = try await cache.audioURL(
-                        songID: song.id,
+                        songID: song.audioKey(quality),
                         remoteURL: remote,
                         waitForCache: false
                     )
                 }
-                guard generation == playbackGeneration, currentSong?.id == song.id else { return }
+                guard generation == playbackGeneration, currentSong?.cacheKey == song.cacheKey else { return }
                 let start = startPositionMs ?? restoredPosition(for: song)
                 audio.play(url: playbackURL, startPositionMs: start)
                 isResolvingPlayback = false
@@ -443,14 +465,15 @@ final class AppStore: ObservableObject {
 
     private func preloadNext() {
         guard let song = nextSongCandidate() else { return }
+        let soundQuality = quality(for: song)
         Task {
             if let cover = song.bestCoverURL { _ = try? await cache.coverData(remoteURL: cover) }
             let remote: URL?
-            if let cached = await cache.remoteURL(songID: song.id, quality: soundQuality) { remote = cached }
-            else { remote = try? await api.songURL(id: song.id, quality: soundQuality) }
+            if let cached = await cache.remoteURL(songID: song.cacheKey, quality: soundQuality) { remote = cached }
+            else { remote = try? await api.songURL(id: song.id, quality: soundQuality, platform: song.source) }
             if let remote {
-                await cache.setRemoteURL(remote, songID: song.id, quality: soundQuality)
-                _ = try? await cache.audioURL(songID: song.id, remoteURL: remote, waitForCache: false)
+                await cache.setRemoteURL(remote, songID: song.cacheKey, quality: soundQuality)
+                _ = try? await cache.audioURL(songID: song.audioKey(soundQuality), remoteURL: remote, waitForCache: false)
             }
             _ = await loadLyrics(for: song)
         }
@@ -491,6 +514,10 @@ final class AppStore: ObservableObject {
     }
 
     private func restoreSettings() {
+        neteaseQuality = defaults.string(forKey: "netease_sound_quality") ?? "exhigh"
+        for platform in MusicPlatform.allCases {
+            if let uid = defaults.string(forKey: platform == .qq ? "qq_id" : "netease_id"), !uid.isEmpty { accountIDs[platform] = uid }
+        }
         soundQuality = defaults.string(forKey: "sound_quality") ?? "hq"
         playbackMode = PlaybackMode(rawValue: defaults.string(forKey: "playback_mode") ?? "") ?? .sequence
         lyricOffsetMs = Int64(defaults.integer(forKey: "lyric_offset"))
@@ -516,18 +543,15 @@ final class AppStore: ObservableObject {
         }
     }
     private func restoredPosition(for song: Song) -> Int64 {
-        guard defaults.string(forKey: "playback_song_id") == song.id else { return 0 }
+        guard defaults.string(forKey: "playback_song_id") == song.cacheKey else { return 0 }
         let value = Int64(defaults.integer(forKey: "playback_position"))
         defaults.set(0, forKey: "playback_position")
         return value
     }
-    private func persistUser() {
-        defaults.set(qqID, forKey: "qq_id"); defaults.set(nickname, forKey: "nickname"); defaults.set(avatarURL, forKey: "avatar_url")
-    }
     private func savePlayback() {
         if let data = try? JSONEncoder().encode(queue) { defaults.set(data, forKey: "playback_queue") }
         defaults.set(currentIndex, forKey: "playback_index")
-        defaults.set(currentSong?.id, forKey: "playback_song_id")
+        defaults.set(currentSong?.cacheKey, forKey: "playback_song_id")
         defaults.set(Int(audio.positionMs), forKey: "playback_position")
     }
 }

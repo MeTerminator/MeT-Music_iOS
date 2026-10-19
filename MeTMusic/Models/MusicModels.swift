@@ -1,5 +1,20 @@
 import Foundation
 
+enum MusicPlatform: String, Codable, CaseIterable, Identifiable, Sendable {
+    case qq, netease
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self)
+        self = value == "netease" ? .netease : .qq
+    }
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.singleValueContainer()
+        try container.encode(self == .netease ? "netease" : "qqmusic")
+    }
+    var id: String { rawValue }
+    var title: String { self == .qq ? "QQ 音乐" : "网易云音乐" }
+    func key(_ id: String) -> String { self == .qq ? id : "netease_" + id }
+}
+
 struct CreatorInfo: Codable, Hashable, Sendable {
     var nickname: String?
     var avatarUrl: String?
@@ -18,6 +33,8 @@ struct CoverSizes: Codable, Hashable, Sendable {
 
 struct Playlist: Codable, Hashable, Identifiable, Sendable {
     var id: String
+    var source: MusicPlatform = .qq
+    var cacheKey: String { source.key(id) }
     var name: String
     var cover: String?
     var coverSize: CoverSizes?
@@ -31,12 +48,13 @@ struct Playlist: Codable, Hashable, Identifiable, Sendable {
     }
 
     enum CodingKeys: String, CodingKey {
-        case id, name, cover, coverImgUrl, coverSize, trackCount, playCount, description, creator
+        case id, source, name, cover, coverImgUrl, coverSize, trackCount, playCount, description, creator
     }
 
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = values.flexibleString(forKey: .id) ?? ""
+        source = (try? values.decode(MusicPlatform.self, forKey: .source)) ?? .qq
         name = (try? values.decode(String.self, forKey: .name)) ?? "未知歌单"
         cover = (try? values.decodeIfPresent(String.self, forKey: .coverImgUrl))
             ?? (try? values.decodeIfPresent(String.self, forKey: .cover))
@@ -55,6 +73,7 @@ struct Playlist: Codable, Hashable, Identifiable, Sendable {
     func encode(to encoder: Encoder) throws {
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encode(id, forKey: .id)
+        try values.encode(source, forKey: .source)
         try values.encode(name, forKey: .name)
         try values.encodeIfPresent(cover, forKey: .coverImgUrl)
         try values.encodeIfPresent(coverSize, forKey: .coverSize)
@@ -94,6 +113,9 @@ struct Album: Codable, Hashable, Identifiable, Sendable {
 }
 
 struct Song: Codable, Hashable, Identifiable, Sendable {
+    var source: MusicPlatform = .qq
+    var cacheKey: String { source.key(id) }
+    func audioKey(_ quality: String) -> String { "\(cacheKey)_\(quality)" }
     var id: String
     var mid: String?
     var name: String
@@ -113,10 +135,11 @@ struct Song: Codable, Hashable, Identifiable, Sendable {
     var formattedDuration: String { String(format: "%02lld:%02lld", durationMs / 60_000, durationMs / 1_000 % 60) }
     var hasTTML: Bool { ttml == 1 }
 
-    enum CodingKeys: String, CodingKey { case id, mid, name, artists = "ar", album = "al", cover, coverSize, durationMs = "dt", ttml }
+    enum CodingKeys: String, CodingKey { case source, id, mid, name, artists = "ar", album = "al", cover, coverSize, durationMs = "dt", ttml }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = values.flexibleString(forKey: .id) ?? ""
+        source = (try? values.decode(MusicPlatform.self, forKey: .source)) ?? .qq
         mid = values.flexibleString(forKey: .mid)
         name = (try? values.decode(String.self, forKey: .name)) ?? "未知歌曲"
         artists = (try? values.decode([Artist].self, forKey: .artists)) ?? []
@@ -126,7 +149,8 @@ struct Song: Codable, Hashable, Identifiable, Sendable {
         durationMs = values.flexibleInt64(forKey: .durationMs) ?? 0
         ttml = values.flexibleInt(forKey: .ttml) ?? 0
     }
-    init(id: String, mid: String? = nil, name: String, artists: [Artist] = [], album: Album? = nil, cover: String? = nil, coverSize: CoverSizes? = nil, durationMs: Int64 = 0, ttml: Int = 0) {
+    init(id: String, mid: String? = nil, name: String, artists: [Artist] = [], album: Album? = nil, cover: String? = nil, coverSize: CoverSizes? = nil, durationMs: Int64 = 0, ttml: Int = 0, source: MusicPlatform = .qq) {
+        self.source = source
         self.id = id; self.mid = mid; self.name = name; self.artists = artists; self.album = album
         self.cover = cover; self.coverSize = coverSize; self.durationMs = durationMs; self.ttml = ttml
     }
@@ -168,6 +192,7 @@ private extension String {
 }
 
 struct UserPlaylistsResponse: Decodable, Sendable {
+    var code: Int?
     var playlist: [Playlist] = []
     var username: String?
     var avatarUrl: String?
@@ -192,6 +217,10 @@ struct LyricResponse: Codable, Sendable {
     var qrc: String?
     var qrctrans: String?
     var qrcroma: String?
+    var yrc: String?
+    var ytlrc: String?
+    var yromalrc: String?
+    var romalrc: String?
 }
 struct TTMLLyricResponse: Decodable, Sendable { var status: String; var content: String? }
 

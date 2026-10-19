@@ -15,6 +15,9 @@ struct LibraryView: View {
         NavigationStack {
             VStack(spacing: 0) {
                 libraryHeader
+                Picker("音乐平台", selection: Binding(get: { store.selectedPlatform }, set: store.selectPlatform)) {
+                    ForEach(MusicPlatform.allCases) { Text($0.title).tag($0) }
+                }.pickerStyle(.segmented).padding(.horizontal, 16).padding(.bottom, 12)
                 ScrollView {
                     LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 16)], spacing: 16) {
                         ForEach(store.playlists) { playlist in
@@ -39,7 +42,7 @@ struct LibraryView: View {
                 .overlay {
                     if store.playlists.isEmpty {
                         if store.loadingPlaylists { ProgressView() }
-                        else { Text("没有找到歌单").foregroundStyle(.secondary) }
+                        else { Text(store.isLoggedIn ? "没有找到歌单" : "在设置中登录\(store.selectedPlatform.title)账号以载入歌单").foregroundStyle(.secondary) }
                     }
                 }
             }
@@ -129,7 +132,7 @@ struct PlaylistDetailView: View {
                             SongRow(
                                 song: song,
                                 number: index + 1,
-                                active: store.currentSong?.id == song.id,
+                                active: store.currentSong?.cacheKey == song.cacheKey,
                                 hasTTML: song.hasTTML
                             )
                         }
@@ -147,7 +150,7 @@ struct PlaylistDetailView: View {
             .musicNavigationBarHidden(false)
             .task { model.songs = await store.tracks(for: playlist) }
             .refreshable { model.songs = await store.tracks(for: playlist, refresh: true) }
-            .overlay { if store.loadingPlaylistIDs.contains(playlist.id) && model.songs.isEmpty { ProgressView().controlSize(.large) } }
+            .overlay { if store.loadingPlaylistIDs.contains(playlist.cacheKey) && model.songs.isEmpty { ProgressView().controlSize(.large) } }
         }
     }
 }

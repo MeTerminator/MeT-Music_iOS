@@ -29,25 +29,25 @@ struct APIClient: Sendable {
     }()
     private let encoder = JSONEncoder()
 
-    func userPlaylists(uid: String) async throws -> UserPlaylistsResponse {
-        try await get(base.appending(path: "user/playlist"), query: ["uid": uid, "limit": "100", "timestamp": nonce()])
+    func userPlaylists(uid: String, platform: MusicPlatform = .qq) async throws -> UserPlaylistsResponse {
+        try await get(base.appending(path: "user/playlist"), query: ["platform": platform.rawValue, "uid": uid, "limit": "100", "timestamp": nonce()])
     }
-    func playlistDetail(id: String) async throws -> PlaylistDetailResponse {
-        try await get(base.appending(path: "playlist/detail"), query: ["id": id, "timestamp": nonce()])
+    func playlistDetail(id: String, platform: MusicPlatform = .qq) async throws -> PlaylistDetailResponse {
+        try await get(base.appending(path: "playlist/detail"), query: ["platform": platform.rawValue, "id": id, "timestamp": nonce()])
     }
-    func playlistTracks(id: String, limit: Int = 500) async throws -> PlaylistTracksResponse {
-        try await get(base.appending(path: "playlist/track/all"), query: ["id": id, "limit": String(limit), "timestamp": nonce()])
+    func playlistTracks(id: String, limit: Int = 500, platform: MusicPlatform = .qq) async throws -> PlaylistTracksResponse {
+        try await get(base.appending(path: "playlist/track/all"), query: ["platform": platform.rawValue, "id": id, "limit": String(limit), "timestamp": nonce()])
     }
-    func songURL(id: String, quality: String) async throws -> URL {
-        let response: SongURLResponse = try await get(base.appending(path: "song/url/v1"), query: ["id": id, "level": quality, "timestamp": nonce()])
+    func songURL(id: String, quality: String, platform: MusicPlatform = .qq) async throws -> URL {
+        let response: SongURLResponse = try await get(base.appending(path: "song/url/v1"), query: ["platform": platform.rawValue, "id": id, "level": quality, "timestamp": nonce()])
         guard let raw = response.data.first?.url, let url = RemoteAssetURL.make(raw) else { throw APIError.missingSongURL }
         return url
     }
-    func lyric(id: String) async throws -> LyricResponse {
-        try await get(base.appending(path: "lyric/new"), query: ["id": id])
+    func lyric(id: String, platform: MusicPlatform = .qq) async throws -> LyricResponse {
+        try await get(base.appending(path: "lyric/new"), query: ["platform": platform.rawValue, "id": id])
     }
-    func ttml(mid: String) async throws -> TTMLLyricResponse {
-        try await get(base.appending(path: "lyric/ttml"), query: ["mid": mid])
+    func ttml(mid: String, platform: MusicPlatform = .qq) async throws -> TTMLLyricResponse {
+        try await get(base.appending(path: "lyric/ttml"), query: ["platform": platform.rawValue, "mid": mid])
     }
     func checkRoom(code: String) async throws -> CheckRoomResponse {
         try await get(roomBase.appending(path: "check"), query: ["code": code])

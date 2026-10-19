@@ -64,7 +64,8 @@ actor CacheStore {
         var song: Song
         var quality: String
         var size: Int64
-        var id: String { song.id }
+        var cacheID: String? = nil
+        var id: String { cacheID ?? song.audioKey(quality) }
     }
 
     private struct RemoteEntry: Sendable { var url: URL; var date: Date }
@@ -177,7 +178,7 @@ actor CacheStore {
             let metadataURL = fileURL(.songMetadata, name: cachedID + ".json")
             let metadata = try? decoder.decode(CachedSongMetadata.self, from: Data(contentsOf: metadataURL))
             let song = metadata?.song ?? Song(id: cachedID, name: "未知歌曲 (ID: \(cachedID))")
-            return .init(song: song, quality: metadata?.quality ?? "unknown", size: Int64(values?.fileSize ?? 0))
+            return .init(song: song, quality: metadata?.quality ?? "unknown", size: Int64(values?.fileSize ?? 0), cacheID: cachedID)
         }
         .sorted { $0.song.name.localizedStandardCompare($1.song.name) == .orderedAscending }
     }
@@ -235,7 +236,7 @@ actor CacheStore {
 
     func saveSongMetadata(_ song: Song, quality: String) throws {
         try encoder.encode(CachedSongMetadata(song: song, quality: quality, cachedAt: Date()))
-            .write(to: fileURL(.songMetadata, name: safe(song.id) + ".json"), options: .atomic)
+            .write(to: fileURL(.songMetadata, name: safe(song.audioKey(quality)) + ".json"), options: .atomic)
     }
 
     func savePlaylists(_ playlists: [Playlist], uid: String) throws {

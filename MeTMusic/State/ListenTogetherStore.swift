@@ -71,7 +71,7 @@ final class ListenTogetherStore: ObservableObject {
         Task { try? await send(.init(action: "seek", userId: sessionID, user: currentUser, data: .init(currentTime: seconds))) }
     }
     func addSong(_ song: Song) {
-        guard room?.playlist.contains(where: { $0.id == song.id }) != true else { return }
+        guard room?.playlist.contains(where: { $0.id == song.id && $0.source == song.source }) != true else { return }
         Task { try? await send(.init(action: "playlist_add", userId: sessionID, user: currentUser, data: .init(song: .init(song: song)))) }
     }
     func removeSong(at index: Int) {
@@ -172,7 +172,7 @@ final class ListenTogetherStore: ObservableObject {
         }
         let song = latest.playlist[latest.currentSongIndex].song
         let targetMs = roomPositionMs(latest, stateServerTime: serverTime)
-        let sameSong = app.currentSong?.id == song.id && roomSongID == song.id
+        let sameSong = app.currentSong?.cacheKey == song.cacheKey && roomSongID == song.cacheKey
         if !sameSong {
             playRoomSong(song, initialPositionMs: targetMs, playing: latest.isPlaying)
             return
@@ -184,10 +184,11 @@ final class ListenTogetherStore: ObservableObject {
     }
 
     private func playRoomSong(_ song: Song, initialPositionMs: Int64, playing: Bool) {
-        guard loadingSongID != song.id else { return }
+        let quality = app.quality(for: song)
+        guard loadingSongID != song.cacheKey else { return }
         generation += 1
         let request = generation
-        loadingSongID = song.id
+        loadingSongID = song.cacheKey
         roomSongID = nil
         app.clearStandaloneStreamingSource()
         app.audio.stop()
@@ -196,23 +197,23 @@ final class ListenTogetherStore: ObservableObject {
         Task {
             do {
                 let local: URL
-                if let cached = await app.cache.cachedAudioURL(songID: song.id) { local = cached }
+                if let cached = await app.cache.cachedAudioURL(songID: song.audioKey(quality)) { local = cached }
                 else {
                     let remote: URL
-                    if let cached = await app.cache.remoteURL(songID: song.id, quality: app.soundQuality) { remote = cached }
-                    else { remote = try await app.api.songURL(id: song.id, quality: app.soundQuality) }
-                    await app.cache.setRemoteURL(remote, songID: song.id, quality: app.soundQuality)
-                    local = try await app.cache.audioURL(songID: song.id, remoteURL: remote, waitForCache: false)
+                    if let cached = await app.cache.remoteURL(songID: song.cacheKey, quality: quality) { remote = cached }
+                    else { remote = try await app.api.songURL(id: song.id, quality: quality, platform: song.source) }
+                    await app.cache.setRemoteURL(remote, songID: song.cacheKey, quality: quality)
+                    local = try await app.cache.audioURL(songID: song.audioKey(quality), remoteURL: remote, waitForCache: false)
                 }
                 guard request == generation, isInRoom,
                       let latest = room,
                       latest.playlist.indices.contains(latest.currentSongIndex),
-                      latest.playlist[latest.currentSongIndex].id == song.id else { return }
+                      latest.playlist[latest.currentSongIndex].song.cacheKey == song.cacheKey else { return }
                 // Recompute after URL resolution so this client starts at the latest room position.
                 let position = roomPositionMs(latest, stateServerTime: lastRoomStateServerMs)
-                roomSongID = song.id
+                roomSongID = song.cacheKey
                 await app.playTogether(song: song, localURL: local, positionMs: position, isPlaying: latest.isPlaying)
-                try? await app.cache.saveSongMetadata(song, quality: app.soundQuality)
+                try? await app.cache.saveSongMetadata(song, quality: quality)
             } catch { errorMessage = "同步歌曲失败：\(error.localizedDescription)" }
             if request == generation { loadingSongID = nil }
         }
@@ -253,7 +254,7 @@ final class ListenTogetherStore: ObservableObject {
             try? await Task.sleep(for: .seconds(1))
             guard let room, room.isPlaying, app.audio.isPlaying,
                   room.playlist.indices.contains(room.currentSongIndex),
-                  room.playlist[room.currentSongIndex].id == app.currentSong?.id else { continue }
+                  room.playlist[room.currentSongIndex].song.cacheKey == app.currentSong?.cacheKey else { continue }
             let target = roomPositionMs(room, stateServerTime: lastRoomStateServerMs)
             if abs(app.audio.positionMs - target) > Int64(app.syncThresholdSeconds * 1_000) {
                 await app.audio.seek(to: target)

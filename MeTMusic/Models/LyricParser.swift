@@ -1,10 +1,10 @@
 import Foundation
 
 enum LyricFormat {
-    case lrc, qrc, ttml
+    case lrc, qrc, yrc, ttml
 
     func transitionLeadMs(configuredMs: Int64) -> Int64 {
-        self == .qrc ? configuredMs : 0
+        self == .qrc || self == .yrc ? configuredMs : 0
     }
 }
 
@@ -14,6 +14,13 @@ enum OrdinaryLyricParser {
     }
 
     static func parseWithFormat(_ response: LyricResponse, removeQRCInformation: Bool = true, song: Song? = nil) -> (lines: [LyricLine], format: LyricFormat) {
+        if let yrc = response.yrc, !yrc.isEmpty {
+            let parsed = parseYRC(yrc)
+            let lines = removeQRCInformation ? QRCInformationFilter.remove(from: parsed, song: song) : parsed
+            if !parsed.isEmpty {
+                return (align(align(lines, source: response.ytlrc ?? response.lrctrans, roman: false), source: response.yromalrc ?? response.romalrc, roman: true), .yrc)
+            }
+        }
         if let qrc = response.qrc, !qrc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let parsed = parseQRC(qrc)
             let lines = removeQRCInformation ? QRCInformationFilter.remove(from: parsed, song: song) : parsed
@@ -23,7 +30,7 @@ enum OrdinaryLyricParser {
                 return (align(align(lines, source: response.qrctrans ?? response.lrctrans, roman: false), source: response.qrcroma, roman: true), .qrc)
             }
         }
-        if let lrc = response.lrc { return (align(parseLRC(lrc), source: response.lrctrans, roman: false), .lrc) }
+        if let lrc = response.lrc { return (align(align(parseLRC(lrc), source: response.lrctrans, roman: false), source: response.romalrc, roman: true), .lrc) }
         return ([], .lrc)
     }
 
@@ -48,6 +55,27 @@ enum OrdinaryLyricParser {
             for wordIndex in result[index].words.indices { result[index].words[wordIndex].endTime = result[index + 1].startTime }
         }
         return result
+    }
+
+    private static func parseYRC(_ source: String) -> [LyricLine] {
+        let linePattern = try! NSRegularExpression(pattern: #"^\[(\d+),(\d+)\]"#)
+        let wordPattern = try! NSRegularExpression(pattern: #"\((\d+),(\d+),\d+\)([^()]*)"#)
+        return source.split(whereSeparator: \.isNewline).enumerated().compactMap { index, raw in
+            let line = String(raw) as NSString
+            guard let timing = linePattern.firstMatch(in: String(raw), range: NSRange(location: 0, length: line.length)) else { return nil }
+            let start = Int64(line.substring(with: timing.range(at: 1))) ?? 0
+            let duration = Int64(line.substring(with: timing.range(at: 2))) ?? 0
+            let range = NSRange(location: timing.range.length, length: line.length - timing.range.length)
+            let words = wordPattern.matches(in: String(raw), range: range).compactMap { match -> LyricWord? in
+                let text = decode(line.substring(with: match.range(at: 3)))
+                guard !text.isEmpty else { return nil }
+                let wordStart = Int64(line.substring(with: match.range(at: 1))) ?? start
+                let wordDuration = Int64(line.substring(with: match.range(at: 2))) ?? 0
+                return .init(startTime: wordStart, endTime: wordStart + wordDuration, word: text)
+            }
+            guard !words.isEmpty else { return nil }
+            return LyricLine(id: "yrc-\(index)-\(start)", words: words, startTime: start, endTime: start + duration)
+        }
     }
 
     private static func parseQRC(_ source: String) -> [LyricLine] {

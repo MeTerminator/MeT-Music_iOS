@@ -45,6 +45,7 @@ struct RoomLog: Codable, Hashable, Identifiable, Sendable {
 }
 
 struct RoomSong: Codable, Hashable, Identifiable, Sendable {
+    var source: MusicPlatform = .qq
     var id: String
     var mid: String?
     var name: String
@@ -55,11 +56,12 @@ struct RoomSong: Codable, Hashable, Identifiable, Sendable {
     var durationMs: Int64 = 0
     var duration: String?
 
-    var song: Song { .init(id: id, mid: mid, name: name, artists: artists, album: album, cover: cover, coverSize: coverSize, durationMs: durationMs) }
-    enum CodingKeys: CodingKey { case id, mid, name, artists, album, cover, coverSize, durationMs, duration }
+    var song: Song { .init(id: id, mid: mid, name: name, artists: artists, album: album, cover: cover, coverSize: coverSize, durationMs: durationMs, source: source) }
+    enum CodingKeys: CodingKey { case source, id, mid, name, artists, album, cover, coverSize, durationMs, duration }
     init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         id = values.flexibleString(forKey: .id) ?? ""
+        source = (try? values.decode(MusicPlatform.self, forKey: .source)) ?? .qq
         mid = values.flexibleString(forKey: .mid)
         name = (try? values.decodeIfPresent(String.self, forKey: .name)) ?? "未知歌曲"
         artists = (try? values.decodeIfPresent([Artist].self, forKey: .artists)) ?? []
@@ -71,6 +73,7 @@ struct RoomSong: Codable, Hashable, Identifiable, Sendable {
         if durationMs <= 0 { durationMs = Self.parseDuration(duration) }
     }
     init(song: Song) {
+        source = song.source
         id = song.id; mid = song.mid; name = song.name; artists = song.artists; album = song.album
         cover = song.cover; coverSize = song.coverSize; durationMs = song.durationMs; duration = song.formattedDuration
     }

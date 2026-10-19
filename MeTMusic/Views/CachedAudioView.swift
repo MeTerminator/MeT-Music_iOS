@@ -63,7 +63,7 @@ struct CachedAudioView: View {
 
     private func delete(_ cached: CacheStore.CachedAudio) async {
         do {
-            try await store.cache.deleteCachedAudio(songID: cached.song.id)
+            try await store.cache.deleteCachedAudio(songID: cached.id)
             await store.refreshCacheSizes()
             await refresh()
             store.showToast("已删除 \(cached.song.name) 的缓存")

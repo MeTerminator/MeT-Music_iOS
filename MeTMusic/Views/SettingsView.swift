@@ -3,6 +3,8 @@ import SwiftUI
 struct SettingsView: View {
   var usesNavigationStack = true
   @EnvironmentObject private var store: AppStore
+  @State private var accountInputs: [MusicPlatform: String] = [:]
+  @State private var pendingPlatforms: Set<MusicPlatform> = []
   @StateObject private var model = SettingsViewModel()
 
   private enum Page: String, CaseIterable, Identifiable {
@@ -80,23 +82,42 @@ struct SettingsView: View {
   private var settingsForm: some View {
     Form {
       if shows(.account) {
-        Section("账户") {
-          HStack {
-            ArtworkView(url: RemoteAssetURL.make(store.avatarURL), cornerRadius: 28).frame(
-              width: 56, height: 56)
-            VStack(alignment: .leading) {
-              Text(store.nickname).font(.headline)
-              Text("QQ \(store.qqID)").foregroundStyle(.secondary)
+        ForEach(MusicPlatform.allCases) { platform in
+          Section(platform.title) {
+            Text(store.accountIDs[platform].map { "用户 ID：\($0)" } ?? "未登录")
+              .foregroundStyle(.secondary)
+            TextField(platform == .qq ? "QQ 号" : "网易云用户 ID", text: Binding(
+              get: { accountInputs[platform] ?? "" }, set: { accountInputs[platform] = $0 }))
+              .disabled(pendingPlatforms.contains(platform))
+            if platform == .netease {
+              Text("个人主页链接中 id= 后的数字。用于读取公开资料和歌单，VIP 播放取决于服务器账号权益。")
+                .font(.caption).foregroundStyle(.secondary)
+            }
+            Button(pendingPlatforms.contains(platform) ? "登录中…" : (store.accountIDs[platform] == nil ? "登录" : "切换账号")) {
+              pendingPlatforms.insert(platform)
+              Task {
+                if await store.login(uid: accountInputs[platform] ?? "", platform: platform) { accountInputs[platform] = "" }
+                pendingPlatforms.remove(platform)
+              }
+            }.disabled(pendingPlatforms.contains(platform))
+            if store.accountIDs[platform] != nil {
+              Button("退出登录", role: .destructive) { store.logout(platform: platform) }
+                .disabled(pendingPlatforms.contains(platform))
             }
           }
-          Button("退出登录", role: .destructive) { model.confirmLogout = true }
         }
       }
       if shows(.playback) {
         Section("播放") {
-          Picker("音质", selection: Binding(get: { store.soundQuality }, set: store.setQuality)) {
+          Picker("QQ 音乐音质", selection: Binding(get: { store.soundQuality }, set: store.setQuality)) {
             ForEach(qualities.keys.sorted(), id: \.self) { key in Text(qualities[key]!).tag(key) }
           }
+          Picker("网易云音乐音质", selection: Binding(get: { store.neteaseQuality }, set: { store.setQuality($0, platform: .netease) })) {
+            ForEach(["standard", "higher", "exhigh", "lossless", "hires", "jyeffect", "dolby", "vivid", "jymaster", "sky"], id: \.self) { key in
+              Text(["standard": "标准", "higher": "较高", "exhigh": "极高", "lossless": "无损", "hires": "Hi-Res", "jyeffect": "高清臻音", "dolby": "杜比全景声", "vivid": "臻音全景声", "jymaster": "超清母带", "sky": "沉浸环绕声"][key] ?? key).tag(key)
+            }
+          }
+          Text("实际音质取决于歌曲、账号权益和设备。").font(.caption).foregroundStyle(.secondary)
           Picker(
             "播放模式", selection: Binding(get: { store.playbackMode }, set: store.setPlaybackMode)
           ) {
@@ -130,7 +151,7 @@ struct SettingsView: View {
               get: { store.removeQRCInformation },
               set: store.setRemoveQRCInformation
             )) {
-            Text("移除 QRC 歌曲信息行")
+            Text("移除 QRC / YRC 歌曲信息行")
             Text("隐藏歌名、创作者、版权及推广信息，保留歌词正文。默认开启。")
               .font(.caption)
               .foregroundStyle(.secondary)
@@ -144,7 +165,7 @@ struct SettingsView: View {
                 UserDefaults.standard.set(Int($0), forKey: "lyric_offset")
               }), in: -3_000...3_000, step: 50)
           Stepper(
-            "QRC 提前步进：\(store.lyricLeadMs) ms",
+            "QRC / YRC 提前步进：\(store.lyricLeadMs) ms",
             value: Binding(
               get: { store.lyricLeadMs },
               set: {

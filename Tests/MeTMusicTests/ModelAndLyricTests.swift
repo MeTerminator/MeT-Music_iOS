@@ -208,3 +208,55 @@ import Testing
         #expect(audioDownloadStatusText(.init(songID: "a")) == "下载中")
     }
 }
+
+@Suite struct MusicPlatformTests {
+    @Test func sourceSurvivesPersistenceAndRoomTransfer() throws {
+        let song = try JSONDecoder().decode(Song.self, from: Data(#"{"id":123,"name":"网易云歌曲","source":"netease"}"#.utf8))
+        #expect(song.source == .netease)
+        #expect(song.cacheKey != Song(id: "123", name: "QQ 歌曲").cacheKey)
+        #expect(song.audioKey("exhigh") != song.audioKey("lossless"))
+        let restored = try JSONDecoder().decode(Song.self, from: JSONEncoder().encode(song))
+        #expect(restored.source == .netease)
+        let room = try JSONDecoder().decode(RoomSong.self, from: JSONEncoder().encode(RoomSong(song: song)))
+        #expect(room.song.source == .netease)
+        #expect(room.song.id == "123")
+        let legacy = try JSONDecoder().decode(Song.self, from: Data(#"{"id":"123","name":"Old"}"#.utf8))
+        #expect(legacy.source == .qq)
+        let qq = try JSONDecoder().decode(Song.self, from: Data(#"{"id":"123","name":"QQ","source":"qqmusic"}"#.utf8))
+        #expect(qq.source == .qq)
+    }
+
+    @Test func nativeYRCUsesAbsoluteWordTimesAndAlignedTranslation() {
+        let response = LyricResponse(lrc: "[00:01.000]旧歌词", yrc: "[1000,1000](1000,400,0)你(1400,600,0)好", ytlrc: "[00:01.000]Hello", yromalrc: "[00:01.000]ni hao")
+        let lines = OrdinaryLyricParser.parse(response)
+        #expect(lines.count == 1)
+        #expect(lines.first?.text == "你好")
+        #expect(lines.first?.words.last?.startTime == 1400)
+        #expect(lines.first?.words.last?.endTime == 2000)
+        #expect(lines.first?.translatedLyric == "Hello")
+        #expect(lines.first?.romanLyric == "ni hao")
+    }
+}
+
+@Suite struct YRCSettingsTests {
+    @Test func yrcUsesSharedInformationFilterAndTransitionLead() {
+        let yrc = "[0,1000](0,1000,0)作词：作者\n[2000,1000](2000,400,0)你(2400,600,0)好\n[4000,1000](4000,1000,0)编曲：作者"
+        let response = LyricResponse(yrc: yrc, ytlrc: "[00:02.000]Hello")
+        let parsed = OrdinaryLyricParser.parseWithFormat(response)
+        #expect(parsed.format == .yrc)
+        #expect(parsed.format.transitionLeadMs(configuredMs: 250) == 250)
+        #expect(parsed.lines.map(\.text) == ["你好"])
+        #expect(parsed.lines.first?.translatedLyric == "Hello")
+        #expect(parsed.lines.first?.words.first?.startTime == 2000)
+        #expect(OrdinaryLyricParser.parse(response, removeQRCInformation: false).count == 3)
+    }
+
+    @Test func filteredYRCDoesNotRestoreMetadataFromLRC() {
+        let result = OrdinaryLyricParser.parseWithFormat(.init(lrc: "[00:00.000]作曲：作者", yrc: "[0,1000](0,1000,0)作曲：作者"))
+        #expect(result.format == .yrc)
+        #expect(result.lines.isEmpty)
+        let fallback = OrdinaryLyricParser.parseWithFormat(.init(lrc: "[00:01.000]正文", yrc: "invalid"))
+        #expect(fallback.format == .lrc)
+        #expect(fallback.format.transitionLeadMs(configuredMs: 250) == 0)
+    }
+}

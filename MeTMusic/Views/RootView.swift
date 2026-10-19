@@ -32,11 +32,7 @@ struct RootView: View {
 
     private var content: some View {
         Group {
-            if store.isLoggedIn {
-                tabContent
-            } else {
-                LoginView()
-            }
+            tabContent
         }
         .overlay(alignment: .top) {
             if let toast = store.toast {
