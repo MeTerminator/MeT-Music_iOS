@@ -130,7 +130,8 @@ public struct AppleMusicLyricsView: View {
                         from: model.timelineEpoch,
                         by: lyricTimelineInterval(
                             largeScreenOptimizations: largeScreenOptimizations,
-                            updatesFrames: updatesFrames
+                            updatesFrames: updatesFrames,
+                            rapidTransitions: model.needsRapidLineUpdates(timeMs: currentTimeMs)
                         )
                     )) { context in
                         let sourceTime = currentTimeProvider?() ?? currentTimeMs
@@ -191,6 +192,7 @@ public struct AppleMusicLyricsView: View {
                                         sampledAt: context.date,
                                         active: active,
                                         highlighted: snapshot.highlightedIndices.contains(index),
+                                        rapidTransition: model.rapidTransitions[index],
                                         blurRadius: lyricUpcomingBlurRadius(
                                             index: index,
                                             focusIndex: snapshot.highlightedIndices.max() ?? snapshot.scrollTargetIndex,
@@ -464,9 +466,11 @@ func lyricRenderingShouldAnimate(
 
 func lyricTimelineInterval(
     largeScreenOptimizations: Bool,
-    updatesFrames: Bool
+    updatesFrames: Bool,
+    rapidTransitions: Bool = false
 ) -> TimeInterval {
     guard updatesFrames else { return 3_600 }
+    if rapidTransitions { return 1.0 / 60.0 }
     // This clock only checks line boundaries and requests scrolling. Active
     // rows own a display-linked clock; the entire list must not run at 60 Hz.
     return 1.0 / 10.0
@@ -509,6 +513,7 @@ final class LyricsViewModel: ObservableObject {
     @Published var isUserScrolling = false
     @Published private(set) var isHorizontalSwiping = false
     @Published private(set) var groups: [LyricGroup]
+    private(set) var rapidTransitions: [Bool]
     var resumeTask: Task<Void, Never>?
     private var horizontalSwipeTask: Task<Void, Never>?
     private(set) var autoScrollTask: Task<Void, Never>?
@@ -530,6 +535,7 @@ final class LyricsViewModel: ObservableObject {
 
     init(groups: [LyricGroup], timeMs: Int64) {
         self.groups = groups
+        rapidTransitions = lyricRapidTransitionFlags(bounds: groups.map(\.renderBounds))
         timeline = Self.makeTimeline(groups)
         interpolator = .init(initialSourceTimeMs: timeMs)
         lastPresentationTimeMs = timeMs
@@ -550,6 +556,13 @@ final class LyricsViewModel: ObservableObject {
         return wrappedCache
     }
 
+    func needsRapidLineUpdates(timeMs: Int64) -> Bool {
+        groups.indices.contains { index in
+            let bounds = groups[index].renderBounds
+            return rapidTransitions[index] && timeMs >= bounds.startTime - 200 && timeMs <= bounds.endTime
+        }
+    }
+
     func sync(timeMs: Int64, lineTransitionLeadMs: Int64 = 0) -> LyricTimelineSnapshot {
         let lead = max(0, lineTransitionLeadMs)
         if lead != transitionLeadMs {
@@ -564,6 +577,7 @@ final class LyricsViewModel: ObservableObject {
         isUserScrolling = false
         isHorizontalSwiping = false
         self.groups = groups
+        rapidTransitions = lyricRapidTransitionFlags(bounds: groups.map(\.renderBounds))
         wrappedCache = []
         wrapKey = []
         anchorFrames = [:]
@@ -602,8 +616,12 @@ final class LyricsViewModel: ObservableObject {
     func scheduleAutoScroll(index: Int, force: Bool = false, action: @escaping @MainActor () -> Void) {
         guard force || lastAutoScrollTarget != index else { return }
         autoScrollTask?.cancel()
+        let prioritizeHighlight = rapidTransitions[safe: index] == true
         autoScrollTask = Task { @MainActor [weak self] in
             await Task.yield()
+            // Give the clear, audio-timed row a display opportunity before
+            // moving the stack. A newer line cancels this pending motion.
+            if prioritizeHighlight { try? await Task.sleep(for: .milliseconds(32)) }
             guard !Task.isCancelled, let self, force || self.lastAutoScrollTarget != index else { return }
             self.lastAutoScrollTarget = index
             self.lastAutoScrollDate = .now
@@ -737,6 +755,7 @@ private struct LyricGroupView: View, Equatable {
     let sampledAt: Date
     let active: Bool
     let highlighted: Bool
+    let rapidTransition: Bool
     let blurRadius: CGFloat
     let isPlaying: Bool
     let isUserScrolling: Bool
@@ -756,30 +775,37 @@ private struct LyricGroupView: View, Equatable {
     var body: some View {
         let targetScale: CGFloat = style.enableScale && !disableTransforms && !reduceEffects && !highlighted && isPlaying ? 0.97 : 1
         // Let the display choose its native cadence, including ProMotion.
-        // Only active rows tick at this rate; boundary polling stays coarse.
+        // Only active rows tick here; rapid passages also poll boundaries faster.
         TimelineView(.animation(minimumInterval: nil, paused: !animatesWords)) { frame in
             let elapsed = animatesWords ? max(0, frame.date.timeIntervalSince(sampledAt)) : 0
-            // The boundary clock samples/calibrates the player at 10 Hz.
+            // The boundary clock samples/calibrates the player at 10 Hz
+            // normally, or 60 Hz during rapid passages.
             // Render frames extrapolate that sample instead of synchronously
             // querying AVPlayer once per frame for every overlapping row.
             let time = animatesWords
                 ? currentTimeMs + Int64(elapsed * 1_000 * style.playbackRate)
                 : currentTimeMs
             groupContent(timeMs: time)
+                // A scroll transaction must never tween the audio-driven
+                // mask or delay insertion of the newly active highlight.
+                .transaction { $0.animation = nil }
         }
         // These effects depend on line state, not word progress. Keep them
         // outside the display-linked subtree so each frame only updates words.
         .padding(.vertical, style.fontSize * 0.4)
-        .foregroundStyle(highlighted ? style.activeColor : style.inactiveColor)
-        .opacity(lyricLineOpacity(isHighlighted: highlighted))
-        .scaleEffect(targetScale, anchor: group.main.isDuet ? .trailing : .leading)
+        .animation(active || highlighted ? nil : .easeInOut(duration: 0.4)) { content in
+            content
+                .foregroundStyle(highlighted ? style.activeColor : style.inactiveColor)
+                .opacity(lyricLineOpacity(isHighlighted: highlighted))
+        }
+        .animation(reduceEffects || disableTransforms ? nil : .spring(response: 0.55, dampingFraction: 0.9).delay(rapidTransition ? 0.06 : 0)) { content in
+            content.scaleEffect(targetScale, anchor: group.main.isDuet ? .trailing : .leading)
+        }
         // Focus changes precede the first sung word. Remove blur immediately
         // on activation, independently of the line's scale/opacity animation.
         .animation(active || highlighted || disableTransforms || reduceEffects ? nil : .easeInOut(duration: 0.4)) { content in
             content.blur(radius: active || highlighted ? 0 : blurRadius)
         }
-        .animation(reduceEffects || disableTransforms ? nil : .spring(response: 0.55, dampingFraction: 0.9), value: targetScale)
-        .animation(.easeInOut(duration: 0.4), value: highlighted)
         .animation(.easeOut(duration: 0.18), value: isUserScrolling)
         .animation(nil, value: reduceEffects)
         .contentShape(Rectangle())
@@ -819,6 +845,7 @@ private struct LyricGroupView: View, Equatable {
             && lhs.currentTimeMs == rhs.currentTimeMs
             && lhs.active == rhs.active
             && lhs.highlighted == rhs.highlighted
+            && lhs.rapidTransition == rhs.rapidTransition
             && lhs.blurRadius == rhs.blurRadius
             && lhs.isPlaying == rhs.isPlaying
             && lhs.isUserScrolling == rhs.isUserScrolling
@@ -872,7 +899,7 @@ private struct LyricGroupView: View, Equatable {
                         chunk: chunk, progress: active ? lyricChunkProgress(words: chunk.words, timeMs: timeMs) : 0,
                         emphasisProgress: active ? lyricEmphasisProgress(words: chunk.words, timeMs: timeMs) : 0,
                         active: active, style: wordStyle,
-                        lift: active ? lyricWordLift(words: chunk.words, timeMs: timeMs) : 0,
+                        lift: active ? lyricWordLift(words: chunk.words, timeMs: timeMs - (rapidTransition ? 60 : 0)) : 0,
                         effectsEnabled: !reduceEffects && !disableTransforms,
                         backgroundVocal: line.isBackground,
                         usesFrameClock: animatesWords,

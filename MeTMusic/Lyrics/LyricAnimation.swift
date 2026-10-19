@@ -38,6 +38,17 @@ public func lyricLineOpacity(isHighlighted: Bool) -> Double {
     isHighlighted ? 0.85 : 1
 }
 
+/// Fast phrases need their activation observed before a scroll/float animation
+/// can obscure the next sung syllable. Include both neighbors and short solos.
+func lyricRapidTransitionFlags(bounds: [LyricRenderBounds]) -> [Bool] {
+    bounds.indices.map { index in
+        var intervals = [bounds[index].endTime - bounds[index].startTime]
+        if index > 0 { intervals.append(bounds[index].startTime - bounds[index - 1].startTime) }
+        if index + 1 < bounds.count { intervals.append(bounds[index + 1].startTime - bounds[index].startTime) }
+        return intervals.contains { $0 > 0 && $0 <= 650 }
+    }
+}
+
 /// Upcoming groups gradually fall out of focus with their distance from the
 /// last highlighted group. Overlapping vocals remain clear, and manual
 /// browsing reveals all text. The radius is constant between line boundaries.

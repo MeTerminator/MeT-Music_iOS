@@ -4,6 +4,30 @@ import Testing
 @testable import MeTMusic
 
 @Suite struct TimelineAndLayoutTests {
+    @Test @MainActor func rapidLinesPrioritizeAudioProgressBeforeMotion() async {
+        let groups = [
+            LyricGroup(main: .init(words: [.init(startTime: 1_000, endTime: 1_200, word: "one")], startTime: 1_000, endTime: 1_200)),
+            LyricGroup(main: .init(words: [.init(startTime: 1_200, endTime: 1_400, word: "two")], startTime: 1_200, endTime: 1_400))
+        ]
+        let model = LyricsViewModel(groups: groups, timeMs: 1_000)
+        #expect(model.rapidTransitions == [true, true])
+        #expect(model.needsRapidLineUpdates(timeMs: 1_190))
+        #expect(!model.needsRapidLineUpdates(timeMs: 5_000))
+        #expect(lyricTimelineInterval(largeScreenOptimizations: true, updatesFrames: true, rapidTransitions: true) < 0.02)
+        #expect(lyricTimelineInterval(largeScreenOptimizations: true, updatesFrames: false, rapidTransitions: true) == 3_600)
+        var moved = false
+        let snapshot = model.sync(timeMs: 1_250)
+        model.scheduleAutoScroll(index: 1) { moved = true }
+        let scrollTask = model.autoScrollTask
+        #expect(snapshot.playingIndices == [1])
+        #expect(lyricUpcomingBlurRadius(index: 1, focusIndex: 1, isUpcoming: false, isFocused: true, isUserScrolling: false, enabled: true, fontSize: 32, maximumRadius: 5) == 0)
+        #expect(lyricChunkProgress(words: groups[1].main.words, timeMs: 1_250) == 0.25)
+        #expect(lyricWordLift(words: groups[1].main.words, timeMs: 1_250 - 60) == 0)
+        #expect(!moved)
+        await scrollTask?.value
+        #expect(moved)
+    }
+
     @Test func displayFramesStayContinuousAcrossJitteredClockCalibration() {
         var clock = PlaybackTimeInterpolator(initialSourceTimeMs: 1_000)
         var previous = Int64(999)
