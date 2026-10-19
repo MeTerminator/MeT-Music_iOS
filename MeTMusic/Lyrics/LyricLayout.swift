@@ -1,5 +1,10 @@
 import NaturalLanguage
 import SwiftUI
+#if os(macOS)
+import AppKit
+#else
+import UIKit
+#endif
 
 struct LyricWordChunk: Identifiable, Hashable {
     let id: String
@@ -13,14 +18,15 @@ struct LyricWordChunk: Identifiable, Hashable {
     let emphasizes: Bool
     let isSingleCJKCharacter: Bool
     var breakAfter: LyricBreakOpportunity = .character
+    var forcesBreakAfter = false
     var isSpace: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
-    init(id: String, words: [LyricWord]) {
+    init(id: String, words: [LyricWord], displaySuffix: String = "", displayOverride: String? = nil) {
         self.id = id
         self.words = words
         text = words.map(\.word).joined()
         isSingleCJKCharacter = text.count == 1 && isCJK(text)
-        displayText = words.map(maskedLyricWord).joined()
+        displayText = (displayOverride ?? words.map(maskedLyricWord).joined()) + displaySuffix
         characters = displayText.map(String.init)
         rubyText = words.flatMap(\.ruby).map(\.word).joined()
         romanText = words.map(\.romanWord).joined()
@@ -48,6 +54,7 @@ struct LyricGroup: Identifiable, Hashable {
     var mainChunks: [LyricWordChunk]
     var backgroundChunks: [LyricWordChunk]
     var renderBounds: LyricRenderBounds
+    var wrappingWidth: CGFloat?
     var id: String { main.id }
 
     init(main: LyricLine, background: LyricLine? = nil) {
@@ -62,6 +69,85 @@ struct LyricGroup: Identifiable, Hashable {
         background = line
         backgroundChunks = chunkLyricWords(line.words)
         renderBounds = lyricGroupRenderBounds(main: main, background: line)
+    }
+}
+
+/// Split only words wider than a complete lyric row. Synthetic hyphens are
+/// display-only; each source grapheme and its authored timing occur once.
+func wrapOversizedLyricChunks(_ chunks: [LyricWordChunk], width: CGFloat, fontSize: CGFloat) -> [LyricWordChunk] {
+    guard width.isFinite, width > 0, fontSize > 0 else { return chunks }
+    #if os(macOS)
+    let font = NSFont.systemFont(ofSize: fontSize, weight: .bold)
+    #else
+    let font = UIFont.systemFont(ofSize: fontSize, weight: .bold)
+    #endif
+    func measure(_ text: String, separateGlyphs: Bool) -> CGFloat {
+        func advance(_ value: String) -> CGFloat {
+            (value as NSString).size(withAttributes: [.font: font]).width
+        }
+        // Fragments can become emphasized even when the original long word
+        // was not. Reserve whichever glyph layout is wider.
+        let glyphWidth = text.reduce(CGFloat.zero) { $0 + advance(String($1)) }
+        return separateGlyphs ? glyphWidth : max(advance(text), glyphWidth)
+    }
+    func fragmentWords(_ words: [LyricWord], range: Range<Int>) -> [LyricWord] {
+        var cursor = 0
+        return words.compactMap { word in
+            let characters = Array(word.word)
+            defer { cursor += characters.count }
+            let lower = max(range.lowerBound - cursor, 0)
+            let upper = min(range.upperBound - cursor, characters.count)
+            guard lower < upper else { return nil }
+            var result = word
+            result.word = String(characters[lower..<upper])
+            let duration = word.endTime - word.startTime
+            result.startTime = word.startTime + Int64(Double(duration) * Double(lower) / Double(characters.count))
+            result.endTime = word.startTime + Int64(Double(duration) * Double(upper) / Double(characters.count))
+            if lower > 0 { result.ruby = []; result.romanWord = "" }
+            return result
+        }
+    }
+    return chunks.flatMap { chunk -> [LyricWordChunk] in
+        guard !chunk.isSpace, chunk.characters.count > 1,
+              measure(chunk.displayText, separateGlyphs: chunk.emphasizes) > width else { return [chunk] }
+        let characters = chunk.characters
+        var fragments: [LyricWordChunk] = []
+        var start = 0
+        while start < characters.count {
+            var lower = start + 1
+            var upper = characters.count
+            var end = start + 1 // Always consume at least one complete grapheme.
+            if measure(characters[start...].joined(), separateGlyphs: chunk.emphasizes) <= width {
+                // The final fragment needs no synthetic hyphen. Check it
+                // before searching prefixes that reserve space for one.
+                end = characters.count
+                lower = upper + 1
+            }
+            while lower <= upper {
+                let candidate = lower + (upper - lower) / 2
+                let suffix = candidate < characters.count && characters[candidate - 1] != "-" ? "-" : ""
+                let text = characters[start..<candidate].joined() + suffix
+                if measure(text, separateGlyphs: chunk.emphasizes) <= width {
+                    end = candidate
+                    lower = candidate + 1
+                } else { upper = candidate - 1 }
+            }
+            // Prefer an existing hyphen, preserving it without doubling it.
+            if end < characters.count,
+               let hyphen = (start..<end).last(where: { characters[$0] == "-" }) {
+                end = hyphen + 1
+            }
+            let suffix = end < characters.count && characters[end - 1] != "-" ? "-" : ""
+            var fragment = LyricWordChunk(
+                id: "\(chunk.id)-wrap-\(start)", words: fragmentWords(chunk.words, range: start..<end),
+                displaySuffix: suffix, displayOverride: characters[start..<end].joined()
+            )
+            fragment.breakAfter = end == characters.count ? chunk.breakAfter : .word
+            fragment.forcesBreakAfter = end < characters.count
+            fragments.append(fragment)
+            start = end
+        }
+        return fragments
     }
 }
 
@@ -245,6 +331,7 @@ struct BalancedLyricLayout: Layout {
     var spaces: [Bool] = []
     var singleCharacterWords: [Bool] = []
     var breakOpportunities: [LyricBreakOpportunity] = []
+    var forcedBreaks: [Bool] = []
 
     struct Cache {
         var sizes: [CGSize] = []
@@ -254,6 +341,7 @@ struct BalancedLyricLayout: Layout {
         var spaces: [Bool] = []
         var singleCharacterWords: [Bool] = []
         var breakOpportunities: [LyricBreakOpportunity] = []
+        var forcedBreaks: [Bool] = []
 
         mutating func updateSizes(_ newSizes: [CGSize]) {
             guard sizes != newSizes else { return }
@@ -274,13 +362,14 @@ struct BalancedLyricLayout: Layout {
     func cachedRows(width: CGFloat, cache: inout Cache) -> [Range<Int>] {
         if cache.width != width || cache.spacing != horizontalSpacing
             || cache.spaces != spaces || cache.singleCharacterWords != singleCharacterWords
-            || cache.breakOpportunities != breakOpportunities {
+            || cache.breakOpportunities != breakOpportunities || cache.forcedBreaks != forcedBreaks {
             cache.rows = calculateRows(sizes: cache.sizes, width: width)
             cache.width = width
             cache.spacing = horizontalSpacing
             cache.spaces = spaces
             cache.singleCharacterWords = singleCharacterWords
             cache.breakOpportunities = breakOpportunities
+            cache.forcedBreaks = forcedBreaks
         }
         return cache.rows
     }
@@ -305,10 +394,11 @@ struct BalancedLyricLayout: Layout {
             }
             cursor = range.upperBound
             let height = rowHeight(range, cache.sizes)
-            let rowWidth = range.reduce(0) { $0 + cache.sizes[$1].width } + CGFloat(max(0, range.count - 1)) * horizontalSpacing
+            let rowWidth = range.reduce(0) { $0 + lyricConstrainedChunkSize(cache.sizes[$1], width: bounds.width).width }
+                + CGFloat(max(0, range.count - 1)) * horizontalSpacing
             var x = trailingAlignment ? bounds.maxX - rowWidth : bounds.minX
             for index in range {
-                let size = cache.sizes[index]
+                let size = lyricConstrainedChunkSize(cache.sizes[index], width: bounds.width)
                 subviews[index].place(at: .init(x: x, y: y + height - size.height), proposal: .init(size))
                 x += size.width + horizontalSpacing
             }
@@ -347,7 +437,9 @@ struct BalancedLyricLayout: Layout {
         let last = visibleEnd(count, start: first)
         guard first < last else { return [] }
         let fullWidth = prefix[last] - prefix[first] + CGFloat(last - first - 1) * horizontalSpacing
-        if fullWidth <= width { return [first..<last] }
+        if fullWidth <= width && !(first..<(last - 1)).contains(where: { forcedBreaks.indices.contains($0) && forcedBreaks[$0] }) {
+            return [first..<last]
+        }
         var costs = Array(repeating: CGFloat.infinity, count: count + 1)
         var rowCounts = Array(repeating: Int.max, count: count + 1)
         var next = Array(repeating: count, count: count + 1)
@@ -361,6 +453,7 @@ struct BalancedLyricLayout: Layout {
                 continue
             }
             for end in (start + 1)...count {
+                if end > start + 1, forcedBreaks.indices.contains(end - 2), forcedBreaks[end - 2] { break }
                 if isSpace(end - 1) { continue }
                 let lineWidth = prefix[end] - prefix[start] + CGFloat(end - start - 1) * horizontalSpacing
                 if lineWidth > width && end > start + 1 { break }
@@ -404,6 +497,7 @@ struct BalancedLyricLayout: Layout {
         }
         for index in 0..<(rows.count - 1) {
             let left = rows[index]
+            if forcedBreaks.indices.contains(left.upperBound - 1), forcedBreaks[left.upperBound - 1] { continue }
             let right = rows[index + 1]
             // A break already on whitespace needs no adjustment.
             guard left.upperBound == right.lowerBound,
@@ -453,6 +547,12 @@ struct BalancedLyricLayout: Layout {
         }
         return rows
     }
+}
+
+/// Keep each prepared word fragment inside its row, including narrow layouts
+/// where even a single grapheme is wider than the available space.
+func lyricConstrainedChunkSize(_ ideal: CGSize, width: CGFloat) -> CGSize {
+    CGSize(width: width.isFinite ? min(ideal.width, max(0, width)) : ideal.width, height: ideal.height)
 }
 
 /// Room for the three-radius shadow, character scale, and emphasis wave.

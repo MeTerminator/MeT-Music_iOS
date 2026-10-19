@@ -145,10 +145,12 @@ public struct AppleMusicLyricsView: View {
                         )
                         let timelineTime = time
                         let snapshot = model.sync(timeMs: timelineTime, lineTransitionLeadMs: lineTransitionLeadMs)
+                        let rowWidth = max(0, geometry.size.width - style.horizontalPadding * (hasDuet ? 4 : 2)) * style.lineWidthFraction
+                        let wrappedGroups = model.wrappedGroups(width: rowWidth, fontSize: style.fontSize, backgroundScale: style.backgroundLineScale)
                         LazyVStack(spacing: style.lineSpacing) {
                             Color.clear.frame(height: geometry.size.height * style.alignPosition)
                             ForEach(groups.indices, id: \.self) { index in
-                                let group = groups[index]
+                                let group = wrappedGroups[index]
                                 let active = snapshot.playingIndices.contains(index)
                                 let previous = groups[safe: index - 1]
                                 let showsInterlude = previous.map {
@@ -514,6 +516,8 @@ final class LyricsViewModel: ObservableObject {
     let timelineEpoch = Date()
     private var timeline: LyricTimeline
     private var transitionLeadMs: Int64 = 0
+    private var wrappedCache: [LyricGroup] = []
+    private var wrapKey: [CGFloat] = []
     private var interpolator: PlaybackTimeInterpolator
     private(set) var lastPresentationTimeMs: Int64
     private(set) var sourceSignature: LyricSourceSignature?
@@ -531,6 +535,21 @@ final class LyricsViewModel: ObservableObject {
         lastPresentationTimeMs = timeMs
     }
 
+    func wrappedGroups(width: CGFloat, fontSize: CGFloat, backgroundScale: CGFloat) -> [LyricGroup] {
+        let key = [width, fontSize, backgroundScale]
+        if wrapKey != key {
+            wrappedCache = groups.map { group in
+                var result = group
+                result.mainChunks = wrapOversizedLyricChunks(group.mainChunks, width: width, fontSize: fontSize)
+                result.backgroundChunks = wrapOversizedLyricChunks(group.backgroundChunks, width: width, fontSize: fontSize * backgroundScale)
+                result.wrappingWidth = width
+                return result
+            }
+            wrapKey = key
+        }
+        return wrappedCache
+    }
+
     func sync(timeMs: Int64, lineTransitionLeadMs: Int64 = 0) -> LyricTimelineSnapshot {
         let lead = max(0, lineTransitionLeadMs)
         if lead != transitionLeadMs {
@@ -545,6 +564,8 @@ final class LyricsViewModel: ObservableObject {
         isUserScrolling = false
         isHorizontalSwiping = false
         self.groups = groups
+        wrappedCache = []
+        wrapKey = []
         anchorFrames = [:]
         self.sourceSignature = sourceSignature
         timeline = Self.makeTimeline(groups, lineTransitionLeadMs: transitionLeadMs)
@@ -791,6 +812,7 @@ private struct LyricGroupView: View, Equatable {
     /// lyrics arrive as a new source, which rebuilds every group.
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.group.id == rhs.group.id
+            && lhs.group.wrappingWidth == rhs.group.wrappingWidth
             && lhs.group.renderBounds == rhs.group.renderBounds
             && lhs.group.mainChunks.count == rhs.group.mainChunks.count
             && lhs.group.backgroundChunks.count == rhs.group.backgroundChunks.count
@@ -842,7 +864,8 @@ private struct LyricGroupView: View, Equatable {
                 trailingAlignment: line.isDuet,
                 spaces: chunks.map(\.isSpace),
                 singleCharacterWords: chunks.map(\.isSingleCJKCharacter),
-                breakOpportunities: chunks.map(\.breakAfter)
+                breakOpportunities: chunks.map(\.breakAfter),
+                forcedBreaks: chunks.map(\.forcesBreakAfter)
             ) {
                 ForEach(chunks) { chunk in
                     TimedChunkView(
@@ -856,7 +879,7 @@ private struct LyricGroupView: View, Equatable {
                         hasRubyLine: hasRuby, hasRomanLine: hasRoman
                     )
                     .equatable()
-                    .fixedSize()
+                    .fixedSize(horizontal: false, vertical: true)
                 }
             }
             if showTranslation, !line.translatedLyric.isEmpty {
@@ -958,6 +981,8 @@ private struct TimedChunkView: View, Equatable {
             if hasRubyLine {
                 Text(chunk.rubyText.isEmpty ? " " : chunk.rubyText)
                     .font(.system(size: style.fontSize * 0.5, weight: .bold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                     .frame(height: style.fontSize * 0.5)
             }
             wordContent(bleed: bleed)
@@ -970,6 +995,8 @@ private struct TimedChunkView: View, Equatable {
             if hasRomanLine {
                 Text(chunk.romanText.isEmpty ? " " : chunk.romanText)
                     .font(.system(size: style.fontSize * 0.5, weight: .bold))
+                    .lineLimit(1)
+                    .truncationMode(.tail)
                     .frame(height: style.fontSize * 0.5)
             }
         }

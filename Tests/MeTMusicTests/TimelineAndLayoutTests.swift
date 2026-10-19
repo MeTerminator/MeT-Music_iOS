@@ -733,6 +733,76 @@ import Testing
         #expect(whitespace.cachedRows(width: 50, cache: &cache).isEmpty)
     }
 
+    @Test @MainActor func oversizedHyphenatedWordsKeepOneBoundedRowAndOriginalTiming() {
+        let text = "extraordinarily-long-hyphenated-word"
+        let chunks = chunkLyricWords([
+            .init(startTime: 1_000, endTime: 4_000, word: text + " "),
+            .init(startTime: 4_000, endTime: 5_000, word: "after")
+        ])
+        #expect(chunks.map(\.text) == [text, " ", "after"])
+        #expect(chunks[0].words.first?.startTime == 1_000)
+        #expect(chunks[0].words.last?.endTime == 4_000)
+        let ideal = [CGSize(width: 600, height: 40), .init(width: 8, height: 40), .init(width: 70, height: 40)]
+        for trailing in [false, true] {
+            let layout = BalancedLyricLayout(trailingAlignment: trailing, spaces: chunks.map(\.isSpace))
+            var cache = BalancedLyricLayout.Cache(sizes: ideal)
+            #expect(layout.cachedRows(width: 240, cache: &cache) == [0..<1, 2..<3])
+            let width = lyricConstrainedChunkSize(ideal[0], width: 240).width
+            let origin: CGFloat = trailing ? 240 - width : 0
+            #expect(origin >= 0 && origin + width <= 240)
+            #expect(lyricConstrainedChunkSize(ideal[0], width: 240).height == 40)
+            #expect(layout.cachedRows(width: 800, cache: &cache) == [0..<3])
+            #expect(lyricConstrainedChunkSize(ideal[0], width: 800) == ideal[0])
+        }
+        #expect(lyricConstrainedChunkSize(ideal[0], width: 0).width == 0)
+    }
+
+    @Test @MainActor func oversizedWordsWrapWithDisplayOnlyHyphensAndContinuousTiming() {
+        for text in ["extraordinarily-long-hyphenated-word", "supercalifragilisticexpialidocious", "e\u{301}👨‍👩‍👧‍👦abcdefghijklmnopqrstuv"] {
+            let source = chunkLyricWords([.init(startTime: 1_000, endTime: 7_000, word: text)])
+            let fragments = wrapOversizedLyricChunks(source, width: 100, fontSize: 32)
+            #expect(fragments.count > 1)
+            #expect(fragments.map(\.text).joined() == text)
+            #expect(fragments.first?.words.first?.startTime == 1_000)
+            #expect(fragments.last?.words.last?.endTime == 7_000)
+            for index in fragments.indices {
+                let fragment = fragments[index]
+                #expect(!fragment.displayText.contains("…"))
+                #expect(fragment.displayText == fragment.text || fragment.displayText == fragment.text + "-")
+                if index < fragments.count - 1 {
+                    #expect(fragment.displayText.hasSuffix("-"))
+                    #expect(fragment.forcesBreakAfter)
+                    #expect(fragment.words.last?.endTime == fragments[index + 1].words.first?.startTime)
+                }
+            }
+            #expect(wrapOversizedLyricChunks(source, width: 10_000, fontSize: 32) == source)
+        }
+    }
+
+    @Test @MainActor func wrappingKeepsSyllableBoundariesAndObsceneMasks() {
+        let source = chunkLyricWords([
+            .init(startTime: 1_000, endTime: 2_000, word: "extraordinarily"),
+            .init(startTime: 2_000, endTime: 5_000, word: "longword", isObscene: true)
+        ])
+        let fragments = wrapOversizedLyricChunks(source, width: 90, fontSize: 32)
+        #expect(fragments.map(\.text).joined() == "extraordinarilylongword")
+        let visible = fragments.map { fragment in
+            fragment.displayText == fragment.text ? fragment.displayText : (fragment.forcesBreakAfter ? String(fragment.displayText.dropLast()) : fragment.displayText)
+        }.joined()
+        #expect(visible == source.map(\.displayText).joined())
+        let words = fragments.flatMap(\.words)
+        #expect(words.contains { $0.endTime == 2_000 })
+        #expect(words.contains { $0.startTime == 2_000 })
+    }
+
+    @Test @MainActor func syntheticHyphensEnforceRowBreaksEvenWhenFollowingFragmentFits() {
+        var layout = BalancedLyricLayout(trailingAlignment: false, forcedBreaks: [true, false])
+        var cache = BalancedLyricLayout.Cache(sizes: [.init(width: 20, height: 30), .init(width: 20, height: 30)])
+        #expect(layout.cachedRows(width: 100, cache: &cache) == [0..<1, 1..<2])
+        layout.forcedBreaks = []
+        #expect(layout.cachedRows(width: 100, cache: &cache) == [0..<2])
+    }
+
     @Test func rubySpacesKeepTheWordAndTimingIntact() {
         let ruby = [LyricWordBase(startTime: 100, endTime: 900, word: "とうきょう")]
         let chunks = chunkLyricWords([
