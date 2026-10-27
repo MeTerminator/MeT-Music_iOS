@@ -10,6 +10,7 @@ public final class LyricTimeline {
     private var highlighted = Set<Int>()
     private var scrollTarget = 0
     private var previousTime: Int64?
+    private var followsLatestAfterSeek = false
     private var startCursor = 0
     private var endCursor = 0
     private var cached = LyricTimelineSnapshot(
@@ -36,6 +37,7 @@ public final class LyricTimeline {
         let seeking = forceSeek || last.map { timeMs < $0 || abs(timeMs - $0) > 1_000 } == true
         if last == nil || seeking {
             rebuild(at: timeMs)
+            followsLatestAfterSeek = seeking
         } else {
             var added = Set<Int>()
             var changed = false
@@ -63,10 +65,16 @@ public final class LyricTimeline {
         }
         // An overlapping upper line can finish without another line starting.
         // Follow the first line still playing even if highlights are held over.
-        if !seeking, let first = playing.min() {
+        if followsLatestAfterSeek, !playing.isEmpty {
+            scrollTarget = playing.max(by: {
+                (bounds[$0].startTime, $0) < (bounds[$1].startTime, $1)
+            }) ?? scrollTarget
+            cached.scrollTargetIndex = scrollTarget
+        } else if !seeking, let first = playing.min() {
             scrollTarget = first
             cached.scrollTargetIndex = first
         }
+        if playing.isEmpty { followsLatestAfterSeek = false }
         previousTime = timeMs
         if last == nil || seeking { cached = snapshot(seeking: seeking) }
         return cached

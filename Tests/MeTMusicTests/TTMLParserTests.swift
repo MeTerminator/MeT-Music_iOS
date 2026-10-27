@@ -51,6 +51,40 @@ import Testing
         #expect(result.metadata["timingMode"] == ["Word"])
     }
 
+    @Test func explicitBreaksSurviveTimedSpansWrappersAndTranslations() throws {
+        let xml = #"""
+        <tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttm="http://www.w3.org/ns/ttml#metadata">
+          <body><div><p begin="1s" end="6s">
+            <span><span begin="1s" end="2s">Hello</span><br/><span begin="2s" end="3s">world</span></span>
+            <span begin="3s" end="4s">你好<br/>世界</span>
+            <span ttm:role="x-translation">第一行<br/>第二行</span>
+          </p></div></body>
+        </tt>
+        """#
+        let lines = try TTMLParser.parseAMLL(xml).lines
+        #expect(lines[0].text == "Hello\nworld你好\n世界")
+        #expect(lines[0].translatedLyric == "第一行\n第二行")
+        #expect(lines[0].words.map(\.startTime) == [1_000, 2_000, 3_000])
+        #expect(lines[0].words.map(\.endTime) == [2_000, 3_000, 4_000])
+        #expect(chunkLyricWords(lines[0].words).filter(\.forcesBreakAfter).count == 2)
+    }
+
+    @Test func lineTimedBreaksAreDifferentFromXMLIndentation() throws {
+        let xml = #"""
+        <tt xmlns="http://www.w3.org/ns/ttml"><body><div>
+          <p begin="1s" end="5s"><span>第一行<br/>第二行</span></p>
+          <p begin="6s" end="9s">
+            <span begin="6s" end="7s">Hello</span>
+            <span begin="7s" end="8s">world</span>
+          </p>
+        </div></body></tt>
+        """#
+        let lines = try TTMLParser.parseAMLL(xml).lines
+        #expect(lines[0].text == "第一行\n第二行")
+        #expect(lines[1].text == "Helloworld")
+        #expect(!chunkLyricWords(lines[1].words).contains { $0.forcesBreakAfter })
+    }
+
     @Test func timeFormats() {
         #expect(TTMLParser.parseTime("01:02:03.456") == 3_723_456)
         #expect(TTMLParser.parseTime("03.5s") == 3_500)

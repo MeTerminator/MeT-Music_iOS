@@ -4,6 +4,153 @@ import Testing
 @testable import MeTMusic
 
 @Suite struct TimelineAndLayoutTests {
+    @Test @MainActor func authoritativeClockSharesSamplesAndDoesNotRunAheadWhenMediaStops() {
+        let clock = LyricMediaClock()
+        let date = Date(timeIntervalSince1970: 100)
+        @MainActor final class Source {
+            var media: Int64 = 1_000
+            var reads = 0
+        }
+        let source = Source()
+        let provider: @MainActor () -> Int64 = { source.reads += 1; return source.media }
+        #expect(clock.sample(provider: provider, fallback: 0, revision: 1, now: date) == 1_000)
+        source.media = 1_002
+        #expect(clock.sample(provider: provider, fallback: 0, revision: 1, now: date.addingTimeInterval(0.002)) == 1_000)
+        #expect(source.reads == 1)
+        source.media = 500
+        #expect(clock.sample(provider: provider, fallback: 0, revision: 2, now: date.addingTimeInterval(0.003)) == 500)
+        for tick in 1...100 {
+            #expect(clock.sample(provider: provider, fallback: 0, revision: 2, now: date.addingTimeInterval(Double(tick) / 60)) == 500)
+        }
+        let model = LyricsViewModel(groups: [], timeMs: 500)
+        for tick in 0...100 {
+            #expect(model.presentationTime(sourceTimeMs: 500, frameDate: date.addingTimeInterval(Double(tick) / 60), isPlaying: true, enabled: true, playbackRate: 1, discontinuityRevision: 2, authoritative: true) == 500)
+        }
+    }
+
+    @Test @MainActor func discontinuityClearsTapProtectionBrowsingAndInFlightMotion() {
+        let groups = (0..<3).map { index in
+            let start = Int64(index * 1_000)
+            return LyricGroup(main: .init(words: [.init(startTime: start, endTime: start + 1_000, word: "line")], startTime: start, endTime: start + 1_000))
+        }
+        let model = LyricsViewModel(groups: groups, timeMs: 0)
+        model.reanchorPlayback(timeMs: 0, revision: 1)
+        _ = model.sync(timeMs: 0)
+        model.contentOriginY = 0
+        model.anchorFrames = [0: CGRect(x: 0, y: 0, width: 300, height: 100), 1: CGRect(x: 0, y: 100, width: 300, height: 100)]
+        model.beginLineTransition(index: 0, enabled: true)
+        model.beginLineTransition(index: 1, enabled: true)
+        #expect(model.lineTransition != nil)
+        model.selectLineForSeeking(index: 2)
+        #expect(model.hasPendingTap)
+        // A slider seek overrides the optimistic lyric tap, even if small.
+        model.reanchorPlayback(timeMs: 1_050, revision: 2)
+        #expect(model.lineTransition == nil)
+        #expect(!model.hasPendingTap)
+        #expect(!model.allowsAnimatedScroll)
+        let snapshot = model.sync(timeMs: 1_050)
+        #expect(snapshot.isSeeking)
+        #expect(snapshot.playingIndices == [1])
+        #expect(model.renderTimeMs == 1_050)
+        model.beginUserScroll()
+        model.reanchorPlayback(timeMs: 900, revision: 3)
+        #expect(!model.isUserScrolling)
+        #expect(model.sync(timeMs: 900).playingIndices == [0])
+    }
+
+    @Test func seekFocusDoesNotReturnToOlderOverlappingLineOnNextTick() {
+        let timeline = LyricTimeline(bounds: [.init(startTime: 0, endTime: 10_000), .init(startTime: 1_000, endTime: 4_000), .init(startTime: 2_000, endTime: 5_000)])
+        _ = timeline.sync(timeMs: 1_500, forceSeek: true)
+        for time in stride(from: Int64(1_500), through: 1_900, by: 50) {
+            #expect(timeline.sync(timeMs: time).scrollTargetIndex == 1)
+        }
+        #expect(timeline.sync(timeMs: 2_050).scrollTargetIndex == 2)
+    }
+
+    @Test func lyricSourceReplacementDetectsMiddleChangesWithSameIDsAndEndpoints() {
+        let lines: [LyricLine] = (0..<3).map { index in
+            let start = Int64(index * 1_000)
+            let end = start + 1_000
+            let word = LyricWord(startTime: start, endTime: end, word: "line")
+            return LyricLine(id: "row-\(index)", words: [word], startTime: start, endTime: end)
+        }
+        var updated = lines
+        updated[1].words[0].startTime += 150
+        let source = LyricSourceSignature(lines: lines, options: .init())
+        #expect(source != LyricSourceSignature(lines: updated, options: .init()))
+        #expect(source == LyricSourceSignature(lines: lines, options: .init()))
+    }
+
+    @Test func instrumentalGapsIncludeIntroAndAllOverlappingVoices() {
+        let gaps = lyricInterludeGaps(bounds: [
+            .init(startTime: 6_000, endTime: 20_000),
+            .init(startTime: 7_000, endTime: 8_000),
+            .init(startTime: 15_000, endTime: 16_000),
+            .init(startTime: 25_000, endTime: 26_000)
+        ])
+        #expect(gaps == [.init(startTime: 0, endTime: 6_000), nil, nil,
+                         .init(startTime: 20_000, endTime: 25_000)])
+        #expect(lyricInterludeGaps(bounds: []).isEmpty)
+        #expect(lyricInterludeGaps(bounds: [.init(startTime: 3_999, endTime: 5_000)]) == [nil])
+    }
+
+    @Test @MainActor func tappingProtectsSelectionUntilTimingArrivesOrTimesOut() {
+        let groups = [
+            LyricGroup(main: .init(words: [.init(startTime: 1_000, endTime: 2_000, word: "one")], startTime: 1_000, endTime: 2_000)),
+            LyricGroup(main: .init(words: [.init(startTime: 8_000, endTime: 10_000, word: "two")], startTime: 7_400, endTime: 10_000))
+        ]
+        let date = Date(timeIntervalSince1970: 1_000)
+        let model = LyricsViewModel(groups: groups, timeMs: 1_000)
+        model.selectLineForSeeking(index: 1, now: date)
+        let pending = model.sync(timeMs: 1_100, now: date.addingTimeInterval(0.5))
+        #expect(pending.scrollTargetIndex == 1)
+        #expect(pending.playingIndices == [1])
+        #expect(model.renderTimeMs == 8_000)
+        #expect(model.hasPendingTap)
+        let arrived = model.sync(timeMs: 8_050, now: date.addingTimeInterval(0.6))
+        #expect(arrived.scrollTargetIndex == 1)
+        #expect(model.renderTimeMs == 8_050)
+        #expect(!model.hasPendingTap)
+
+        model.selectLineForSeeking(index: 1, now: date)
+        let failed = model.sync(timeMs: 1_200, now: date.addingTimeInterval(1))
+        #expect(failed.scrollTargetIndex == 0)
+        #expect(model.renderTimeMs == 1_200)
+        #expect(!model.hasPendingTap)
+    }
+
+    @Test @MainActor func tapProtectionExpiresWithoutPlaybackTicks() async {
+        let groups = [
+            LyricGroup(main: .init(words: [.init(startTime: 0, endTime: 2_000, word: "one")], startTime: 0, endTime: 2_000)),
+            LyricGroup(main: .init(words: [.init(startTime: 5_000, endTime: 7_000, word: "two")], startTime: 5_000, endTime: 7_000))
+        ]
+        let model = LyricsViewModel(groups: groups, timeMs: 0)
+        model.selectLineForSeeking(index: 1)
+        let revision = model.selectionRevision
+        #expect(model.hasPendingTap)
+        await model.tapReconciliationTask?.value
+        #expect(!model.hasPendingTap)
+        #expect(model.selectionRevision > revision)
+        #expect(model.sync(timeMs: 0).scrollTargetIndex == 0)
+    }
+
+    @Test @MainActor func lastLyricTapWinsAndBrowsingCancelsProtection() {
+        let groups = (0..<3).map { index in
+            let start = Int64(index * 5_000)
+            return LyricGroup(main: .init(words: [.init(startTime: start, endTime: start + 2_000, word: "line")], startTime: start, endTime: start + 2_000))
+        }
+        let date = Date()
+        let model = LyricsViewModel(groups: groups, timeMs: 0)
+        model.selectLineForSeeking(index: 2, now: date)
+        model.selectLineForSeeking(index: 1, now: date)
+        #expect(model.sync(timeMs: 0, now: date).scrollTargetIndex == 1)
+        #expect(model.renderTimeMs == 5_000)
+        model.beginUserScroll()
+        #expect(!model.hasPendingTap)
+        #expect(model.sync(timeMs: 0, now: date).scrollTargetIndex == 0)
+        #expect(model.renderTimeMs == 0)
+    }
+
     @Test @MainActor func rapidLinesPrioritizeAudioProgressBeforeMotion() async {
         let groups = [
             LyricGroup(main: .init(words: [.init(startTime: 1_000, endTime: 1_200, word: "one")], startTime: 1_000, endTime: 1_200)),
@@ -670,6 +817,144 @@ import Testing
         model.beginHorizontalSwipe()
         #expect(!model.isUserScrolling)
         model.cancelTasks()
+    }
+
+    @Test @MainActor func authoredNewlinesForceRowsEvenWhenEverythingFits() {
+        let line = LyricLine(words: [.init(startTime: 1_000, endTime: 4_000, word: "one\r\ntwo")], startTime: 1_000, endTime: 4_000)
+        let optimized = optimizeLyricLines([line])[0]
+        #expect(optimized.text == "one\ntwo")
+        let chunks = chunkLyricWords(optimized.words)
+        #expect(chunks.map(\.text) == ["one", "\n", "two"])
+        #expect(chunks[1].forcesBreakAfter)
+        let layout = BalancedLyricLayout(trailingAlignment: false, spaces: chunks.map(\.isSpace), forcedBreaks: chunks.map(\.forcesBreakAfter))
+        var cache = BalancedLyricLayout.Cache(sizes: [.init(width: 40, height: 30), .zero, .init(width: 40, height: 30)])
+        #expect(layout.cachedRows(width: 500, cache: &cache) == [0..<1, 2..<3])
+        #expect(layout.cachedRows(width: 45, cache: &cache) == [0..<1, 2..<3])
+        #expect(chunks[0].words.first?.startTime == 1_000)
+        #expect(chunks[2].words.last?.endTime == 4_000)
+    }
+
+    @Test func lineSpringsTravelFullWrappedHeightWithStaggeredStarts() {
+        let date = Date(timeIntervalSince1970: 0)
+        let motion = LyricLineTransition(focusIndex: 3, startDate: date, contentOriginY: 0)
+        #expect(motion.offset(index: 3, contentOriginY: -300, at: date) == 300)
+        #expect(motion.offset(index: 3, contentOriginY: -300, at: date.addingTimeInterval(0.1)) < 300)
+        #expect(motion.offset(index: 5, contentOriginY: -300, at: date.addingTimeInterval(0.1)) == 300)
+        var previous = CGFloat(301)
+        for tick in 0...140 {
+            let value = motion.offset(index: 3, contentOriginY: -300, at: date.addingTimeInterval(Double(tick) / 100))
+            #expect(value <= previous)
+            #expect(value >= 0)
+            previous = value
+        }
+        #expect(previous < 0.01)
+        #expect(motion.offset(index: 3, contentOriginY: -300, at: date.addingTimeInterval(1.41)) == 0)
+    }
+
+    @Test @MainActor func consecutiveLineStepsPreservePositionAndVelocity() {
+        let groups = (0..<4).map { index in
+            let start = Int64(index * 3_000)
+            return LyricGroup(main: .init(words: [.init(startTime: start, endTime: start + 2_000, word: "line")], startTime: start, endTime: start + 2_000))
+        }
+        let date = Date(timeIntervalSince1970: 0)
+        let model = LyricsViewModel(groups: groups, timeMs: 0)
+        model.contentOriginY = 0
+        model.anchorFrames = Dictionary(uniqueKeysWithValues: (0..<4).map { ($0, CGRect(x: 0, y: $0 * 100, width: 300, height: 100)) })
+        #expect(!model.beginLineTransition(index: 0, enabled: true, now: date))
+        #expect(model.beginLineTransition(index: 1, enabled: true, now: date))
+        model.contentOriginY = -100
+        let nextDate = date.addingTimeInterval(0.18)
+        let old = model.lineTransition!
+        let oldPosition = 100 + old.offset(index: 2, contentOriginY: -100, at: nextDate)
+        #expect(model.beginLineTransition(index: 2, enabled: true, now: nextDate))
+        let retargeted = model.lineTransition!
+        let newPosition = retargeted.offset(index: 2, contentOriginY: -200, at: nextDate)
+        #expect(abs(oldPosition - newPosition) < 0.001)
+        let delta = 0.0001
+        let nextFrame = nextDate.addingTimeInterval(delta)
+        let oldVelocity = (old.offset(index: 2, contentOriginY: -100, at: nextFrame) - old.offset(index: 2, contentOriginY: -100, at: nextDate)) / delta
+        let newVelocity = (retargeted.offset(index: 2, contentOriginY: -200, at: nextFrame) - newPosition) / delta
+        #expect(abs(oldVelocity - newVelocity) < 2)
+        #expect(oldVelocity < 0)
+        #expect(!model.beginLineTransition(index: 2, enabled: true, now: nextDate))
+        #expect(model.lineTransition == retargeted)
+        #expect(!model.beginLineTransition(index: 3, enabled: false, now: nextDate))
+        #expect(model.lineTransition == nil)
+    }
+
+    @Test func manualScrollReleaseKeepsNativeInputResponsive() {
+        let date = Date(timeIntervalSince1970: 0)
+        let motion = LyricLineTransition(focusIndex: 1, startDate: date, contentOriginY: 100)
+        let release = motion.released(at: date, contentOriginY: 20)
+        #expect(release.offset(index: 1, contentOriginY: 20, at: date) == 80)
+        let frame = date.addingTimeInterval(0.05)
+        let first = 100 + release.offset(index: 1, contentOriginY: 20, at: frame)
+        let dragged = 50 + release.offset(index: 1, contentOriginY: -30, at: frame)
+        #expect(abs(first - dragged - 50) < 0.001)
+        #expect(release.offset(index: 1, contentOriginY: -30, at: date.addingTimeInterval(0.161)) == 0)
+    }
+
+    @Test func mixedHeightLyricsNeverOverlapDuringRapidRetargetsAndCollapse() {
+        let date = Date(timeIntervalSince1970: 0)
+        var motion = LyricLineTransition(focusIndex: 1, startDate: date, contentOriginY: 0)
+        var origin: CGFloat = -160
+        for step in 2...10 {
+            motion = motion.appendingStep(index: step, at: date.addingTimeInterval(Double(step - 1) * 0.07), contentOriginY: origin, rapid: step.isMultiple(of: 2))
+            origin -= CGFloat([44, 180, 76, 280][step % 4])
+            for tick in 0...60 {
+                let frame = date.addingTimeInterval(Double(step - 1) * 0.07 + Double(tick) / 120)
+                var layoutY = origin
+                var previousBottom = -CGFloat.infinity
+                var previousOffset = -CGFloat.infinity
+                for index in 0..<20 {
+                    // Wrapped text, translation and collapsing backing vocals
+                    // have different heights, while stack order remains fixed.
+                    let height = CGFloat([38, tick < 25 ? 210 : 42, 96, 160][index % 4])
+                    let offset = motion.offset(index: index, contentOriginY: origin, at: frame)
+                    let top = layoutY + offset
+                    #expect(offset >= previousOffset - 0.001)
+                    #expect(top >= previousBottom - 0.001)
+                    previousOffset = offset
+                    previousBottom = top + height
+                    layoutY += height + 6
+                }
+            }
+        }
+    }
+
+    @Test func downwardCorrectionsAndManualReleasePreserveOrder() {
+        let date = Date(timeIntervalSince1970: 0)
+        let down = LyricLineTransition(focusIndex: 3, startDate: date, contentOriginY: -400)
+        let mixed = down.appendingStep(index: 4, at: date.addingTimeInterval(0.15), contentOriginY: -200, rapid: false)
+        let release = mixed.released(at: date.addingTimeInterval(0.2), contentOriginY: -320)
+        for tick in 0...180 {
+            let frame = date.addingTimeInterval(Double(tick) / 120)
+            for motion in [down, mixed, release] {
+                var last = -CGFloat.infinity
+                for row in 0..<12 {
+                    let offset = motion.offset(index: row, contentOriginY: motion.isRelease ? -350 : -200, at: frame)
+                    #expect(offset >= last - 0.001)
+                    last = offset
+                }
+            }
+        }
+    }
+
+    @Test @MainActor func rapidStepsUseShorterDelaysAndLayoutChangesCancelMotion() {
+        let groups = [
+            LyricGroup(main: .init(words: [], startTime: 0, endTime: 200)),
+            LyricGroup(main: .init(words: [], startTime: 200, endTime: 400))
+        ]
+        let model = LyricsViewModel(groups: groups, timeMs: 0)
+        model.contentOriginY = 0
+        model.anchorFrames = [0: CGRect(x: 0, y: 0, width: 300, height: 100), 1: CGRect(x: 0, y: 100, width: 300, height: 100)]
+        model.beginLineTransition(index: 0, enabled: true)
+        #expect(model.beginLineTransition(index: 1, enabled: true))
+        #expect(model.lineTransition?.rapid == true)
+        model.beginUserScroll()
+        #expect(model.lineTransition?.isRelease == true)
+        model.layoutDidChange()
+        #expect(model.lineTransition == nil)
     }
 
     @Test @MainActor func lyricWrappingCacheTracksWidthFontMetricsAndSpacing() {

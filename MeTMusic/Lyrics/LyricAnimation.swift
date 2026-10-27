@@ -347,3 +347,125 @@ private func easeInOutBack(_ value: Double) -> Double {
     if x < 0.5 { return pow(2 * x, 2) * ((c2 + 1) * 2 * x - c2) / 2 }
     return (pow(2 * x - 2, 2) * ((c2 + 1) * (x * 2 - 2) + c2) + 2) / 2
 }
+
+/// Apple Music's tap handling protects selection briefly while a seek reaches
+/// its timing provider. The timeout always restores the authoritative clock.
+struct LyricTapSelection {
+    let index: Int
+    let timeMs: Int64
+    let date: Date
+
+    func resolve(mediaTimeMs: Int64, now: Date) -> (timeMs: Int64, holdsSelection: Bool) {
+        let waiting = now.timeIntervalSince(date) < 1
+            && abs(Double(mediaTimeMs) - Double(timeMs)) > 500
+        return (waiting ? timeMs : mediaTimeMs, waiting)
+    }
+}
+
+/// Silence begins after ALL earlier voices have ended, including background
+/// vocals. Index zero represents a leading instrumental section.
+func lyricInterludeGaps(bounds: [LyricRenderBounds], minimumGapMs: Int64 = 4_000) -> [LyricTimeBounds?] {
+    var previousEnd: Int64 = 0
+    return bounds.map { bound in
+        defer { previousEnd = max(previousEnd, bound.endTime) }
+        guard bound.startTime - previousEnd >= minimumGapMs else { return nil }
+        return .init(startTime: previousEnd, endTime: bound.startTime)
+    }
+}
+
+/// Every row shares the same scroll displacement. For an upward step, the
+/// residual offset is nondecreasing with row index: adding it to an ordered
+/// stack cannot make a later row cross an earlier one. Active steps add rather
+/// than restarting independent positions/velocities on each lyric boundary.
+struct LyricLineTransition: Equatable, Sendable {
+    struct Step: Equatable, Sendable {
+        let focusIndex: Int
+        let startDate: Date
+        let originY: CGFloat
+        var displacement: CGFloat?
+        let rapid: Bool
+    }
+
+    private(set) var steps: [Step]
+    private var releaseDate: Date?
+    var focusIndex: Int { steps.last?.focusIndex ?? 0 }
+    var rapid: Bool { steps.last?.rapid ?? false }
+    var isRelease: Bool { releaseDate != nil }
+    var duration: TimeInterval { isRelease ? 0.16 : 1.4 }
+
+    init(focusIndex: Int, startDate: Date, contentOriginY: CGFloat, rapid: Bool = false) {
+        steps = [.init(focusIndex: focusIndex, startDate: startDate, originY: contentOriginY, rapid: rapid)]
+    }
+
+    func appendingStep(index: Int, at date: Date, contentOriginY: CGFloat, rapid: Bool) -> Self {
+        guard !isRelease else { return .init(focusIndex: index, startDate: date, contentOriginY: contentOriginY, rapid: rapid) }
+        var result = self
+        result.freezeDisplacements(contentOriginY: contentOriginY)
+        result.steps.removeAll { date.timeIntervalSince($0.startDate) >= 1.4 }
+        result.steps.append(.init(focusIndex: index, startDate: date, originY: contentOriginY, rapid: rapid))
+        return result
+    }
+
+    func released(at date: Date, contentOriginY: CGFloat) -> Self {
+        var result = self
+        result.freezeDisplacements(contentOriginY: contentOriginY)
+        result.releaseDate = date
+        return result
+    }
+
+    private mutating func freezeDisplacements(contentOriginY: CGFloat) {
+        for index in steps.indices where steps[index].displacement == nil {
+            steps[index].displacement = steps[index].originY - contentOriginY
+        }
+    }
+
+    func offset(index: Int, contentOriginY: CGFloat, at date: Date) -> CGFloat {
+        let poseDate = releaseDate ?? date
+        var value: CGFloat = 0
+        for step in steps {
+            let elapsed = max(0, poseDate.timeIntervalSince(step.startDate))
+            guard elapsed < 1.4 else { continue }
+            let displacement = step.displacement ?? (step.originY - contentOriginY)
+            // A downward correction moves the entire stack together. Using
+            // ascending delays with a negative displacement would compress it.
+            let delay = displacement > 0
+                ? min(Double(max(0, index - step.focusIndex)) * (step.rapid ? 0.018 : 0.055), step.rapid ? 0.072 : 0.22)
+                : 0
+            let time = max(0, elapsed - delay)
+            let frequency: CGFloat = step.rapid ? 18 : 12
+            value += displacement * (1 + frequency * time) * exp(-frequency * time)
+        }
+        if let releaseDate {
+            let phase = min(max(date.timeIntervalSince(releaseDate) / 0.16, 0), 1)
+            value *= 1 - phase * phase * (3 - 2 * phase)
+        }
+        return value
+    }
+}
+
+/// One authoritative sample shared by boundary detection and overlapping vocal
+/// rows. No free-running interpolation: a paused or buffering media clock stays
+/// still. At most one source read per 120 Hz display interval.
+@MainActor
+final class LyricMediaClock {
+    private var sampledAt: Date?
+    private var sampledRevision: UInt?
+    private var sampledTimeMs: Int64 = 0
+
+    func sample(provider: (@MainActor () -> Int64)?, fallback: Int64, revision: UInt, now: Date = .now) -> Int64 {
+        guard let provider else { return fallback }
+        if sampledRevision == revision, let sampledAt {
+            let age = now.timeIntervalSince(sampledAt)
+            if age >= 0 && age < 1.0 / 120 { return sampledTimeMs }
+        }
+        sampledTimeMs = provider()
+        sampledAt = now
+        sampledRevision = revision
+        return sampledTimeMs
+    }
+
+    func invalidate() {
+        sampledAt = nil
+        sampledRevision = nil
+    }
+}

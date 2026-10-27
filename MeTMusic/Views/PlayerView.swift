@@ -561,7 +561,7 @@ struct PlayerView: View {
         style.alignPosition = 0.2
         style.lineSpacing = 6
         style.wordFadeWidth = 0.5
-        style.userScrollResumeDelay = .seconds(5)
+        style.userScrollResumeDelay = .seconds(3)
         return style
     }
 

@@ -263,10 +263,14 @@ final class AppStore: ObservableObject {
         let request = accurateSeekGeneration
         let generation = playbackGeneration
         activeSeek = Task { @MainActor [weak self] in
-            defer { self?.activeSeek = nil }
+            defer {
+                // An old song's completion cannot clear a newer seek task.
+                if let self, request == accurateSeekGeneration { activeSeek = nil }
+            }
             var applied: Int64?
-            while let self, let target = takeRequestedSeekTarget(applied: applied) {
-                guard request == accurateSeekGeneration, generation == playbackGeneration else { return }
+            while let self {
+                guard !Task.isCancelled, request == accurateSeekGeneration, generation == playbackGeneration else { return }
+                guard let target = takeRequestedSeekTarget(applied: applied) else { break }
                 if await applySeek(to: target) { applied = target }
             }
             guard let self, request == accurateSeekGeneration, generation == playbackGeneration else { return }
@@ -402,6 +406,8 @@ final class AppStore: ObservableObject {
     private func startStandalone(_ song: Song, startPositionMs: Int64? = nil) {
         playbackGeneration += 1
         accurateSeekGeneration += 1
+        activeSeek?.cancel()
+        activeSeek = nil
         requestedSeekTargetMs = nil
         seekResumesPlayback = false
         let generation = playbackGeneration
@@ -436,8 +442,10 @@ final class AppStore: ObservableObject {
                 isResolvingPlayback = false
                 if let cover = song.bestCoverURL { Task { _ = try? await cache.coverData(remoteURL: cover) } }
                 let ordinary = await loadOrdinaryLyricResult(for: song)
+                guard generation == playbackGeneration else { return }
                 apply(ordinary, to: song)
                 let ttml = await loadTTMLLyricResult(for: song, fallback: ordinary)
+                guard generation == playbackGeneration else { return }
                 apply(ttml, to: song)
                 try? await cache.saveSongMetadata(song, quality: quality)
                 savePlayback()
@@ -453,6 +461,7 @@ final class AppStore: ObservableObject {
 
     func playTogether(song: Song, localURL: URL, positionMs: Int64, isPlaying: Bool) async {
         playbackGeneration += 1
+        let generation = playbackGeneration
         clearStandaloneStreamingSource()
         currentSong = song
         lyrics = []
@@ -460,6 +469,7 @@ final class AppStore: ObservableObject {
         ttmlAuthor = nil
         audio.play(url: localURL, autoPlay: isPlaying, startPositionMs: positionMs)
         let lyricResult = await loadLyricResult(for: song)
+        guard generation == playbackGeneration else { return }
         apply(lyricResult, to: song)
     }
 
@@ -509,6 +519,8 @@ final class AppStore: ObservableObject {
     func clearStandaloneStreamingSource() {
         isResolvingPlayback = false
         accurateSeekGeneration += 1
+        activeSeek?.cancel()
+        activeSeek = nil
         requestedSeekTargetMs = nil
         seekResumesPlayback = false
     }

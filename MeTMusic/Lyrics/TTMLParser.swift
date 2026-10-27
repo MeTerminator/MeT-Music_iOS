@@ -70,7 +70,7 @@ private final class XMLNode {
 
     var localName: String { name.split(separator: ":").last.map(String.init) ?? name }
     var children: [XMLNode] { content.compactMap { if case let .element(node) = $0 { node } else { nil } } }
-    var textContent: String { content.map { $0.text }.joined() }
+    var textContent: String { localName == "br" ? "\u{2028}" : content.map { $0.text }.joined() }
 
     func attribute(_ name: String) -> String? {
         attributes.first { ($0.key.split(separator: ":").last.map(String.init) ?? $0.key) == name }?.value
@@ -140,6 +140,7 @@ private struct ParsedSyllable {
     var start: Int64
     var end: Int64
     var endsWithSpace = false
+    var endsWithLineBreak = false
     var ruby: [LyricWordBase] = []
     var isObscene = false
     var emptyBeat: Int?
@@ -315,7 +316,9 @@ private final class DocumentParser {
                     result.words[result.words.count - 1].endsWithSpace = true
                 }
             case let .element(node):
-                if node.attribute("ruby") == "container" {
+                if node.localName == "br" {
+                    appendLineBreak(into: result, fullText: &fullText)
+                } else if node.attribute("ruby") == "container" {
                     parseRuby(node, into: result, fullText: &fullText)
                 } else {
                     switch node.attribute("role") {
@@ -340,6 +343,7 @@ private final class DocumentParser {
             let last = result.words.count - 1
             result.words[last].text = result.words[last].text.trimmingCharacters(in: .whitespacesAndNewlines)
             result.words[last].endsWithSpace = false
+            result.words[last].endsWithLineBreak = false
         }
         let timed = result.words.map { ($0.start, $0.end) } + (result.background.map { [($0.start, $0.end)] } ?? [])
         if let minimum = timed.map(\.0).min(), result.start == 0 || (minimum > 0 && minimum < result.start) { result.start = minimum }
@@ -353,17 +357,35 @@ private final class DocumentParser {
         return result
     }
 
+    private func appendLineBreak(into result: ParsedContent, fullText: inout String) {
+        fullText += "\u{2028}"
+        if !result.words.isEmpty { result.words[result.words.count - 1].endsWithLineBreak = true }
+    }
+
     private func parseWord(_ node: XMLNode, into result: ParsedContent, fullText: inout String) {
+        if node.localName == "br" {
+            appendLineBreak(into: result, fullText: &fullText)
+            return
+        }
         guard let begin = node.attribute("begin"), let end = node.attribute("end") else {
-            // Some TTML wraps timed spans in an untimed formatting span.
-            for child in node.children { parseWord(child, into: result, fullText: &fullText) }
+            // Formatting wrappers may contain text, timed spans and <br/>.
+            for item in node.content {
+                switch item {
+                case let .text(raw):
+                    if raw.contains("\n") && raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { continue }
+                    fullText += clean(raw, trim: false) ?? ""
+                case let .element(child): parseWord(child, into: result, fullText: &fullText)
+                }
+            }
             return
         }
         let raw = node.textContent
         let normalized = clean(raw, trim: false) ?? ""
         fullText += normalized
         let formatting = raw.contains("\n")
-        if !formatting, normalized.first?.isWhitespace == true, !result.words.isEmpty {
+        if normalized.first == "\u{2028}", !result.words.isEmpty {
+            result.words[result.words.count - 1].endsWithLineBreak = true
+        } else if !formatting, normalized.first?.isWhitespace == true, !result.words.isEmpty {
             result.words[result.words.count - 1].endsWithSpace = true
         }
         let text = normalized.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -373,6 +395,7 @@ private final class DocumentParser {
             start: TTMLParser.parseTime(begin),
             end: TTMLParser.parseTime(end),
             endsWithSpace: !formatting && normalized.last?.isWhitespace == true,
+            endsWithLineBreak: normalized.last == "\u{2028}",
             isObscene: node.attribute("obscene") == "true",
             emptyBeat: node.attribute("empty-beat").flatMap(Int.init)
         ))
@@ -429,12 +452,12 @@ private final class DocumentParser {
 
     private func convert(_ source: ParsedContent, id: String, background: Bool, duet: Bool) -> LyricLine {
         var words = source.words.isEmpty
-            ? [LyricWord(startTime: source.start, endTime: source.end, word: source.text)]
+            ? [LyricWord(startTime: source.start, endTime: source.end, word: source.text.replacingOccurrences(of: "\u{2028}", with: "\n"))]
             : source.words.map {
                 LyricWord(
                     startTime: $0.start,
                     endTime: $0.end,
-                    word: $0.text + ($0.endsWithSpace ? " " : ""),
+                    word: $0.text.replacingOccurrences(of: "\u{2028}", with: "\n") + ($0.endsWithLineBreak ? "\n" : ($0.endsWithSpace ? " " : "")),
                     isObscene: $0.isObscene,
                     emptyBeat: $0.emptyBeat,
                     ruby: $0.ruby
@@ -446,8 +469,8 @@ private final class DocumentParser {
         return .init(
             id: id,
             words: words,
-            translatedLyric: translation,
-            romanLyric: roman?.words.isEmpty == false ? "" : roman?.text ?? "",
+            translatedLyric: translation.replacingOccurrences(of: "\u{2028}", with: "\n"),
+            romanLyric: roman?.words.isEmpty == false ? "" : (roman?.text ?? "").replacingOccurrences(of: "\u{2028}", with: "\n"),
             startTime: source.start,
             endTime: source.end,
             isBackground: background,
@@ -484,7 +507,11 @@ private final class DocumentParser {
 
     private func clean(_ value: String?, trim: Bool = true) -> String? {
         guard let value else { return nil }
-        let normalized = value.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+        // XML source indentation is collapsible whitespace; <br/> is a
+        // structural separator and must survive repeated normalization.
+        let normalized = value.components(separatedBy: "\u{2028}")
+            .map { $0.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression) }
+            .joined(separator: "\u{2028}")
         return trim ? normalized.trimmingCharacters(in: .whitespacesAndNewlines) : normalized
     }
 }

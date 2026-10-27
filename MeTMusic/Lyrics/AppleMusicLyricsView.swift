@@ -22,7 +22,7 @@ public struct AppleMusicLyricsStyle: Sendable {
     public var enableFrameInterpolation = true
     public var playbackRate: Double = 1
     public var alwaysPostpositionBackground = false
-    public var userScrollResumeDelay: Duration = .seconds(5)
+    public var userScrollResumeDelay: Duration = .seconds(3)
 
     public init() {}
 }
@@ -100,6 +100,12 @@ public struct AppleMusicLyricsView: View {
         .onChange(of: signature) { _, _ in
             updateSourceIfNeeded(signature)
         }
+        .onChange(of: playbackDiscontinuityRevision, initial: true) { _, revision in
+            model.reanchorPlayback(
+                timeMs: currentTimeProvider?() ?? currentTimeMs,
+                revision: revision
+            )
+        }
         .onDisappear { model.cancelTasks() }
     }
 
@@ -130,138 +136,67 @@ public struct AppleMusicLyricsView: View {
                         from: model.timelineEpoch,
                         by: lyricTimelineInterval(
                             largeScreenOptimizations: largeScreenOptimizations,
-                            updatesFrames: updatesFrames,
-                            rapidTransitions: model.needsRapidLineUpdates(timeMs: currentTimeMs)
+                            updatesFrames: updatesFrames || model.lineTransition != nil,
+                            rapidTransitions: currentTimeProvider != nil || model.lineTransition != nil || model.needsRapidLineUpdates(timeMs: currentTimeMs)
                         )
                     )) { context in
-                        let sourceTime = currentTimeProvider?() ?? currentTimeMs
-                        let time = model.presentationTime(
+                        // A TimelineView date can be an old scheduled tick on a
+                        // parent-driven update, especially while paused. Pair a
+                        // fresh media sample with the time it was actually read.
+                        let sampledAt = Date.now
+                        let sourceTime = model.mediaClock.sample(
+                            provider: currentTimeProvider, fallback: currentTimeMs,
+                            revision: playbackDiscontinuityRevision, now: sampledAt
+                        )
+                        let mediaTime = model.presentationTime(
                             sourceTimeMs: sourceTime,
-                            frameDate: context.date,
+                            frameDate: sampledAt,
                             isPlaying: isPlaying,
                             enabled: style.enableFrameInterpolation && isActive
                                 && !isPageTransitioning && !model.isHorizontalSwiping,
                             playbackRate: style.playbackRate,
-                            discontinuityRevision: playbackDiscontinuityRevision
+                            discontinuityRevision: playbackDiscontinuityRevision,
+                            authoritative: currentTimeProvider != nil
                         )
-                        let timelineTime = time
-                        let snapshot = model.sync(timeMs: timelineTime, lineTransitionLeadMs: lineTransitionLeadMs)
+                        let snapshot = model.sync(timeMs: mediaTime, lineTransitionLeadMs: lineTransitionLeadMs)
+                        let time = model.renderTimeMs
                         let rowWidth = max(0, geometry.size.width - style.horizontalPadding * (hasDuet ? 4 : 2)) * style.lineWidthFraction
                         let wrappedGroups = model.wrappedGroups(width: rowWidth, fontSize: style.fontSize, backgroundScale: style.backgroundLineScale)
                         LazyVStack(spacing: style.lineSpacing) {
                             Color.clear.frame(height: geometry.size.height * style.alignPosition)
                             ForEach(groups.indices, id: \.self) { index in
                                 let group = wrappedGroups[index]
-                                let active = snapshot.playingIndices.contains(index)
-                                let previous = groups[safe: index - 1]
-                                let showsInterlude = previous.map {
-                                    shouldShowLyricInterlude(
-                                        previousEndTimeMs: $0.renderBounds.endTime,
-                                        nextStartTimeMs: group.main.startTime,
-                                        currentTimeMs: timelineTime,
-                                        hasActiveLyrics: !snapshot.playingIndices.isEmpty
-                                    )
-                                } ?? false
-                                VStack(alignment: group.main.isDuet ? .trailing : .leading, spacing: 0) {
-                                    if let previous,
-                                       group.main.startTime - previous.renderBounds.endTime >= 4_000 {
-                                        // Keep the slot mounted and animate its occupied height.
-                                        // This pushes every following lyric down instead of
-                                        // instantly inserting a full-height row into the stack.
-                                        VerticalLyricRevealLayout(progress: showsInterlude ? 1 : 0, attachedAbove: false) {
-                                            TimelineView(.animation(minimumInterval: nil, paused: !updatesFrames || !showsInterlude)) { frame in
-                                                let elapsed = updatesFrames ? max(0, frame.date.timeIntervalSince(context.date)) : 0
-                                                InterludeDotsView(
-                                                    animation: calculateInterludeDotsAnimation(
-                                                        elapsedMs: timelineTime - previous.renderBounds.endTime + Int64(elapsed * 1_000 * style.playbackRate),
-                                                        durationMs: group.main.startTime - previous.renderBounds.endTime
-                                                    ),
-                                                    color: style.activeColor,
-                                                    trailing: group.main.isDuet
-                                                )
-                                            }
-                                            .padding(.bottom, style.lineSpacing)
-                                            .opacity(showsInterlude ? 1 : 0)
-                                        }
-                                        .allowsHitTesting(false)
-                                        .accessibilityHidden(!showsInterlude)
-                                    }
-                                    LyricGroupView(
-                                        group: group,
-                                        currentTimeMs: active ? time : 0,
-                                        sampledAt: context.date,
-                                        active: active,
-                                        highlighted: snapshot.highlightedIndices.contains(index),
-                                        rapidTransition: model.rapidTransitions[index],
-                                        blurRadius: lyricUpcomingBlurRadius(
-                                            index: index,
-                                            focusIndex: snapshot.highlightedIndices.max() ?? snapshot.scrollTargetIndex,
-                                            isUpcoming: timelineTime < group.renderBounds.startTime,
-                                            isFocused: active || snapshot.highlightedIndices.contains(index),
-                                            isUserScrolling: model.isUserScrolling,
-                                            enabled: style.enableBlur && isActive && !isPageTransitioning && !model.isHorizontalSwiping,
-                                            fontSize: style.fontSize,
-                                            maximumRadius: style.maximumBlurRadius
-                                        ),
-                                        isPlaying: isPlaying && isActive
-                                            && !isPageTransitioning && !model.isHorizontalSwiping,
-                                        isUserScrolling: model.isUserScrolling,
-                                        reduceEffects: !isActive || isPageTransitioning || model.isHorizontalSwiping,
-                                        disableTransforms: reduceMotion,
-                                        style: style,
-                                        styleSignature: .init(style),
-                                        showTranslation: showTranslation,
-                                        showRomanization: showRomanization,
-                                        onTap: {
-                                            model.resumeAutomaticFollowing()
-                                            onLineTap(group.main)
-                                            model.scheduleAutoScroll(index: index, force: true) {
-                                                scroll(
-                                                    proxy: proxy, to: group.id,
-                                                    index: index, groups: groups,
-                                                    isSeeking: true,
-                                                    animated: model.allowsAnimatedScroll
-                                                )
-                                            }
-                                        }
-                                    )
-                                    .equatable()
-                                }
-                                // Animate the whole group, including the lyric's placement.
-                                // On exit, the dots' slot collapses as the next lyric rises
-                                // into it, rather than only animating the indicator itself.
-                                .animation(
-                                    isActive && !isPageTransitioning && !model.isHorizontalSwiping
-                                        && !model.isUserScrolling && !snapshot.isSeeking && !reduceMotion
-                                        ? (showsInterlude
-                                            ? .interpolatingSpring(mass: 0.9, stiffness: 115, damping: 16, initialVelocity: 0)
-                                            : .easeInOut(duration: 0.45))
-                                        : nil,
-                                    value: showsInterlude
+                                lyricRow(
+                                    group: group, index: index, groups: groups, snapshot: snapshot,
+                                    time: time, sampledAt: sampledAt, updatesFrames: updatesFrames,
+                                    viewport: geometry.size, hasDuet: hasDuet, proxy: proxy
                                 )
-                                .id(group.id)
-                                .frame(maxWidth: max(0, geometry.size.width - style.horizontalPadding * (hasDuet ? 4 : 2)) * style.lineWidthFraction,
-                                       alignment: group.main.isDuet ? .trailing : .leading)
-                                .frame(maxWidth: .infinity, alignment: group.main.isDuet ? .trailing : .leading)
-                                .background {
-                                    if index == snapshot.scrollTargetIndex {
-                                        GeometryReader { row in
-                                            Color.clear.preference(
-                                                key: LyricAnchorFramePreference.self,
-                                                value: [index: row.frame(in: .named(model.scrollCoordinateSpace))]
-                                            )
-                                        }
-                                    }
-                                }
                             }
                             Color.clear.frame(height: geometry.size.height * (1 - style.alignPosition))
                         }
+                        .animation(
+                            reduceMotion || !isActive || isPageTransitioning || model.isUserScrolling
+                                || model.isHorizontalSwiping ? nil : .spring(response: 0.38, dampingFraction: 0.92),
+                            value: [rowWidth, style.fontSize, style.secondaryFontSize,
+                                    showTranslation ? 1 : 0, showRomanization ? 1 : 0]
+                        )
                         .padding(.horizontal, style.horizontalPadding)
+                        .coordinateSpace(name: model.contentCoordinateSpace)
+                        .background {
+                            GeometryReader { content in
+                                Color.clear.preference(
+                                    key: LyricContentOriginPreference.self,
+                                    value: Optional(content.frame(in: .named(model.scrollCoordinateSpace)).minY)
+                                )
+                            }
+                        }
                         .onChange(of: LyricScrollRequest(
                             index: snapshot.scrollTargetIndex,
                             isSeeking: snapshot.isSeeking,
                             lineBoundaryIndex: snapshot.playingIndices.max(),
-                            positionCheckTick: Int(context.date.timeIntervalSince(model.timelineEpoch) * 2)
+                            positionCheckTick: Int(sampledAt.timeIntervalSince(model.timelineEpoch) * 2),
+                            discontinuityRevision: playbackDiscontinuityRevision,
+                            sourceRevision: model.sourceRevision
                         ), initial: true) { _, request in
                             followLyrics(request, proxy: proxy, groups: groups, viewport: geometry.size)
                         }
@@ -270,6 +205,9 @@ public struct AppleMusicLyricsView: View {
                 .coordinateSpace(name: model.scrollCoordinateSpace)
                 .onPreferenceChange(LyricAnchorFramePreference.self) { frames in
                     model.anchorFrames = frames
+                }
+                .onPreferenceChange(LyricContentOriginPreference.self) { origin in
+                    model.contentOriginY = origin
                 }
                 .scrollIndicators(.hidden)
                 .background {
@@ -342,6 +280,130 @@ public struct AppleMusicLyricsView: View {
         }
     }
 
+    private func lyricRow(
+        group: LyricGroup, index: Int, groups: [LyricGroup], snapshot: LyricTimelineSnapshot,
+        time: Int64, sampledAt: Date, updatesFrames: Bool, viewport: CGSize,
+        hasDuet: Bool, proxy: ScrollViewProxy
+    ) -> some View {
+        let timelineTime = time
+        let active = snapshot.playingIndices.contains(index)
+        let gap = model.interludeGaps[index]
+        let showsInterlude = gap.map {
+            shouldShowLyricInterlude(
+                previousEndTimeMs: $0.startTime,
+                nextStartTimeMs: $0.endTime,
+                currentTimeMs: timelineTime,
+                hasActiveLyrics: !snapshot.playingIndices.isEmpty
+            )
+        } ?? false
+        return VStack(alignment: group.main.isDuet ? .trailing : .leading, spacing: 0) {
+            if let gap {
+                // Keep the slot mounted and animate its occupied height.
+                // This pushes every following lyric down instead of
+                // instantly inserting a full-height row into the stack.
+                VerticalLyricRevealLayout(progress: showsInterlude ? 1 : 0, attachedAbove: false) {
+                    LyricInterludeView(
+                        gap: gap, timeMs: timelineTime, sampledAt: sampledAt,
+                        playbackRate: style.playbackRate, updatesFrames: updatesFrames && showsInterlude,
+                        color: style.activeColor, trailing: group.main.isDuet
+                    )
+                    .padding(.bottom, style.lineSpacing)
+                    .opacity(showsInterlude ? 1 : 0)
+                }
+                .allowsHitTesting(false)
+                .accessibilityHidden(!showsInterlude)
+            }
+            LyricGroupView(
+                group: group,
+                currentTimeMs: active ? time : 0,
+                isProgressFrozen: model.hasPendingTap,
+                sampledAt: sampledAt,
+                mediaClock: model.mediaClock,
+                currentTimeProvider: currentTimeProvider,
+                clockRevision: playbackDiscontinuityRevision,
+                active: active,
+                highlighted: snapshot.highlightedIndices.contains(index),
+                rapidTransition: model.rapidTransitions[index],
+                blurRadius: lyricUpcomingBlurRadius(
+                    index: index,
+                    focusIndex: snapshot.highlightedIndices.max() ?? snapshot.scrollTargetIndex,
+                    isUpcoming: timelineTime < group.renderBounds.startTime,
+                    isFocused: active || snapshot.highlightedIndices.contains(index),
+                    isUserScrolling: model.isUserScrolling,
+                    enabled: style.enableBlur && isActive && !isPageTransitioning && !model.isHorizontalSwiping,
+                    fontSize: style.fontSize,
+                    maximumRadius: style.maximumBlurRadius
+                ),
+                isPlaying: isPlaying && isActive
+                    && !isPageTransitioning && !model.isHorizontalSwiping,
+                isUserScrolling: model.isUserScrolling,
+                reduceEffects: !isActive || isPageTransitioning || model.isHorizontalSwiping,
+                disableTransforms: reduceMotion,
+                style: style,
+                styleSignature: .init(style),
+                showTranslation: showTranslation,
+                showRomanization: showRomanization,
+                onTap: {
+                    if currentTimeProvider != nil {
+                        // The real seek publishes its clock revision.
+                        // Do not render an invented lyric position first.
+                        model.resumeAutomaticFollowing()
+                        onLineTap(group.main)
+                        return
+                    }
+                    model.selectLineForSeeking(index: index)
+                    onLineTap(group.main)
+                    model.scheduleAutoScroll(index: index, force: true) {
+                        scroll(
+                            proxy: proxy, to: group.id,
+                            index: index, groups: groups,
+                            isSeeking: true,
+                            animated: model.allowsAnimatedScroll
+                        )
+                    }
+                }
+            )
+            .equatable()
+            .id(model.sourceRevision)
+        }
+        // Animate the whole group, including the lyric's placement.
+        // On exit, the dots' slot collapses as the next lyric rises
+        // into it, rather than only animating the indicator itself.
+        .animation(
+            isActive && !isPageTransitioning && !model.isHorizontalSwiping
+                && !model.isUserScrolling && !snapshot.isSeeking && !reduceMotion
+                ? (showsInterlude
+                    ? .interpolatingSpring(mass: 0.9, stiffness: 115, damping: 16, initialVelocity: 0)
+                    : .easeInOut(duration: 0.45))
+                : nil,
+            value: showsInterlude
+        )
+        .id(group.id)
+        .frame(maxWidth: max(0, viewport.width - style.horizontalPadding * (hasDuet ? 4 : 2)) * style.lineWidthFraction,
+               alignment: group.main.isDuet ? .trailing : .leading)
+        .frame(maxWidth: .infinity, alignment: group.main.isDuet ? .trailing : .leading)
+        .modifier(LyricLineTransitionModifier(
+            transition: model.lineTransition, index: index,
+            coordinateSpace: model.scrollCoordinateSpace,
+            contentCoordinateSpace: model.contentCoordinateSpace,
+            frameDate: sampledAt,
+            enabled: isActive && !isPageTransitioning
+                && !model.isHorizontalSwiping && !reduceMotion
+        ))
+        .background {
+            // Capture enough neighbors for the next step without
+            // measuring every previously realized row while browsing.
+            if abs(index - snapshot.scrollTargetIndex) <= 8 {
+                GeometryReader { row in
+                    Color.clear.preference(
+                        key: LyricAnchorFramePreference.self,
+                        value: [index: row.frame(in: .named(model.scrollCoordinateSpace))]
+                    )
+                }
+            }
+        }
+    }
+
     private func followCurrentLyrics(proxy: ScrollViewProxy, groups: [LyricGroup], viewport: CGSize) {
         let snapshot = model.sync(
             timeMs: model.lastPresentationTimeMs,
@@ -361,7 +423,7 @@ public struct AppleMusicLyricsView: View {
         viewport: CGSize
     ) {
         guard isActive, !isPageTransitioning, !model.isHorizontalSwiping else { return }
-        if let boundaryIndex = request.lineBoundaryIndex {
+        if let boundaryIndex = request.lineBoundaryIndex, !model.hasPendingTap {
             model.scheduleClockCalibration(index: boundaryIndex) { onLineBoundary() }
         }
         guard lyricViewportIsUsable(viewport), !model.isUserScrolling,
@@ -397,8 +459,13 @@ public struct AppleMusicLyricsView: View {
         isSeeking: Bool,
         animated: Bool = true
     ) {
+        if isSeeking {
+            model.beginLineTransition(index: index, enabled: false)
+            scrollImmediately(proxy: proxy, to: id)
+            return
+        }
         let interval = groups.indices.contains(index - 1) ? groups[index].main.startTime - groups[index - 1].main.startTime : nil
-        let interlude = groups.indices.contains(index - 1) && groups[index].main.startTime - groups[index - 1].renderBounds.endTime >= 4_000
+        let interlude = model.interludeGaps[safe: index].flatMap { $0 } != nil
         let parameters = lyricScrollSpringPolicy(isSeeking: isSeeking, isInterludeActive: interlude, intervalMs: interval)
         let animation = Animation.interpolatingSpring(
             mass: parameters.mass,
@@ -406,6 +473,16 @@ public struct AppleMusicLyricsView: View {
             damping: parameters.damping,
             initialVelocity: 0
         )
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        let usesLineSprings = withTransaction(transaction) {
+            let prepared = model.beginLineTransition(
+                index: index, enabled: animated && !reduceMotion && !isSeeking && !interlude
+            )
+            if prepared { scrollImmediately(proxy: proxy, to: id) }
+            return prepared
+        }
+        guard !usesLineSprings else { return }
         if animated && !reduceMotion {
             withAnimation(animation) {
                 proxy.scrollTo(id, anchor: .init(x: 0.5, y: style.alignPosition))
@@ -471,25 +548,19 @@ func lyricTimelineInterval(
 ) -> TimeInterval {
     guard updatesFrames else { return 3_600 }
     if rapidTransitions { return 1.0 / 60.0 }
-    // This clock only checks line boundaries and requests scrolling. Active
-    // rows own a display-linked clock; the entire list must not run at 60 Hz.
+    // Without a live provider, coarse samples use the lightweight fallback.
+    // A live provider requests display-rate boundary checks via rapidTransitions.
     return 1.0 / 10.0
 }
 
 struct LyricSourceSignature: Equatable {
-    let count: Int
-    let firstID: String?
-    let lastID: String?
-    let firstStartTime: Int64?
-    let lastEndTime: Int64?
+    // Array equality short-circuits shared storage during ordinary playback,
+    // but still detects changed middle timestamps/text in a replacement source.
+    let lines: [LyricLine]
     let options: OptimizeLyricOptions
 
     init(lines: [LyricLine], options: OptimizeLyricOptions) {
-        count = lines.count
-        firstID = lines.first?.id
-        lastID = lines.last?.id
-        firstStartTime = lines.first?.startTime
-        lastEndTime = lines.last?.endTime
+        self.lines = lines
         self.options = options
     }
 }
@@ -499,6 +570,8 @@ private struct LyricScrollRequest: Equatable {
     var isSeeking: Bool
     var lineBoundaryIndex: Int?
     var positionCheckTick: Int = 0
+    var discontinuityRevision: UInt = 0
+    var sourceRevision: UInt = 0
 }
 
 private struct LyricAnchorFramePreference: PreferenceKey {
@@ -508,14 +581,34 @@ private struct LyricAnchorFramePreference: PreferenceKey {
     }
 }
 
+private struct LyricContentOriginPreference: PreferenceKey {
+    static let defaultValue: CGFloat? = nil
+    static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
+        if let next = nextValue() { value = next }
+    }
+}
+
 @MainActor
 final class LyricsViewModel: ObservableObject {
     @Published var isUserScrolling = false
     @Published private(set) var isHorizontalSwiping = false
     @Published private(set) var groups: [LyricGroup]
     private(set) var rapidTransitions: [Bool]
+    private(set) var interludeGaps: [LyricTimeBounds?]
+    private(set) var renderTimeMs: Int64
+    private var tapSelection: LyricTapSelection?
+    @Published private(set) var selectionRevision: UInt = 0
+    @Published private(set) var sourceRevision: UInt = 0
+    let mediaClock = LyricMediaClock()
+    private var observedPlaybackRevision: UInt?
+    private var needsTimelineReanchor = false
+    @Published private(set) var lineTransition: LyricLineTransition?
+    private(set) var lineTransitionTask: Task<Void, Never>?
+    private var previousTransitionIndex: Int?
+    var hasPendingTap: Bool { tapSelection != nil }
     var resumeTask: Task<Void, Never>?
     private var horizontalSwipeTask: Task<Void, Never>?
+    private(set) var tapReconciliationTask: Task<Void, Never>?
     private(set) var autoScrollTask: Task<Void, Never>?
     private var clockCalibrationTask: Task<Void, Never>?
     let timelineEpoch = Date()
@@ -527,6 +620,8 @@ final class LyricsViewModel: ObservableObject {
     private(set) var lastPresentationTimeMs: Int64
     private(set) var sourceSignature: LyricSourceSignature?
     let scrollCoordinateSpace = UUID()
+    let contentCoordinateSpace = UUID()
+    var contentOriginY: CGFloat?
     var anchorFrames: [Int: CGRect] = [:]
     private var lastAutoScrollDate = Date.distantPast
     private var lastAutoScrollTarget: Int?
@@ -535,6 +630,8 @@ final class LyricsViewModel: ObservableObject {
 
     init(groups: [LyricGroup], timeMs: Int64) {
         self.groups = groups
+        interludeGaps = lyricInterludeGaps(bounds: groups.map(\.renderBounds))
+        renderTimeMs = timeMs
         rapidTransitions = lyricRapidTransitionFlags(bounds: groups.map(\.renderBounds))
         timeline = Self.makeTimeline(groups)
         interpolator = .init(initialSourceTimeMs: timeMs)
@@ -563,13 +660,105 @@ final class LyricsViewModel: ObservableObject {
         }
     }
 
-    func sync(timeMs: Int64, lineTransitionLeadMs: Int64 = 0) -> LyricTimelineSnapshot {
+    func sync(timeMs: Int64, lineTransitionLeadMs: Int64 = 0, now: Date = .now) -> LyricTimelineSnapshot {
         let lead = max(0, lineTransitionLeadMs)
         if lead != transitionLeadMs {
             transitionLeadMs = lead
             timeline = Self.makeTimeline(groups, lineTransitionLeadMs: lead)
         }
-        return timeline.sync(timeMs: timeMs)
+        let resolution = tapSelection?.resolve(mediaTimeMs: timeMs, now: now)
+        renderTimeMs = resolution?.timeMs ?? timeMs
+        let shouldReconcile = tapSelection != nil && resolution?.holdsSelection != true
+        if shouldReconcile { tapSelection = nil }
+        var snapshot = timeline.sync(timeMs: renderTimeMs, forceSeek: shouldReconcile || needsTimelineReanchor)
+        needsTimelineReanchor = false
+        if let selection = tapSelection { snapshot.scrollTargetIndex = selection.index }
+        return snapshot
+    }
+
+    func reanchorPlayback(timeMs: Int64, revision: UInt) {
+        guard observedPlaybackRevision != revision else { return }
+        observedPlaybackRevision = revision
+        cancelTasks()
+        mediaClock.invalidate()
+        interpolator = .init(initialSourceTimeMs: timeMs)
+        lastPresentationTimeMs = timeMs
+        renderTimeMs = timeMs
+        needsTimelineReanchor = true
+        lastAutoScrollTarget = nil
+        lastCalibratedLineIndex = nil
+        suppressAnimatedScrollUntil = Date.now.addingTimeInterval(0.35)
+        selectionRevision &+= 1
+    }
+
+    /// Animates a shared content displacement with ordered per-row delays.
+    /// Individual lyric frames never become independent animation targets.
+    @discardableResult
+    func beginLineTransition(index: Int, enabled: Bool, now: Date = .now) -> Bool {
+        let previous = previousTransitionIndex
+        previousTransitionIndex = index
+        guard enabled else {
+            lineTransitionTask?.cancel()
+            lineTransition = nil
+            return false
+        }
+        guard previous != index else { return false }
+        guard let previous, (1...3).contains(index - previous),
+              anchorFrames[index] != nil, let contentOriginY else {
+            lineTransitionTask?.cancel()
+            lineTransition = nil
+            return false
+        }
+        let rapid = rapidTransitions[safe: index] == true
+        lineTransition = lineTransition?.appendingStep(index: index, at: now, contentOriginY: contentOriginY, rapid: rapid)
+            ?? .init(focusIndex: index, startDate: now, contentOriginY: contentOriginY, rapid: rapid)
+        scheduleLineTransitionCompletion()
+        return true
+    }
+
+    private func scheduleLineTransitionCompletion() {
+        lineTransitionTask?.cancel()
+        guard let duration = lineTransition?.duration else { return }
+        lineTransitionTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(duration))
+            guard !Task.isCancelled else { return }
+            self?.lineTransition = nil
+        }
+    }
+
+    /// Hand manual scrolling the current picture, not the already-final native
+    /// anchor. Residual drawing offsets fade while native input moves freely.
+    private func releaseLineTransition(now: Date = .now) {
+        previousTransitionIndex = nil
+        guard let motion = lineTransition, let contentOriginY else { return }
+        lineTransition = motion.released(at: now, contentOriginY: contentOriginY)
+        scheduleLineTransitionCompletion()
+    }
+
+    private func cancelLineTransition() {
+        lineTransitionTask?.cancel()
+        lineTransition = nil
+        previousTransitionIndex = nil
+    }
+
+    func selectLineForSeeking(index: Int, now: Date = .now) {
+        guard groups.indices.contains(index) else { return }
+        resumeAutomaticFollowing()
+        let time = lyricTapSeekTime(line: groups[index].main, lyricOffsetMs: 0)
+        tapSelection = .init(index: index, timeMs: time, date: now)
+        selectionRevision &+= 1
+        renderTimeMs = time
+        _ = timeline.sync(timeMs: time, forceSeek: true)
+        tapReconciliationTask?.cancel()
+        tapReconciliationTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled, let self, self.tapSelection != nil else { return }
+            self.tapSelection = nil
+            // Also reconcile when playback is paused and there are no media
+            // samples or display ticks to end the optimistic selection.
+            _ = self.timeline.sync(timeMs: self.lastPresentationTimeMs, forceSeek: true)
+            self.selectionRevision &+= 1
+        }
     }
 
     func reset(groups: [LyricGroup], timeMs: Int64, sourceSignature: LyricSourceSignature) {
@@ -577,11 +766,17 @@ final class LyricsViewModel: ObservableObject {
         isUserScrolling = false
         isHorizontalSwiping = false
         self.groups = groups
+        interludeGaps = lyricInterludeGaps(bounds: groups.map(\.renderBounds))
+        renderTimeMs = timeMs
         rapidTransitions = lyricRapidTransitionFlags(bounds: groups.map(\.renderBounds))
         wrappedCache = []
         wrapKey = []
         anchorFrames = [:]
         self.sourceSignature = sourceSignature
+        sourceRevision &+= 1
+        mediaClock.invalidate()
+        needsTimelineReanchor = true
+        suppressAnimatedScrollUntil = Date.now.addingTimeInterval(0.35)
         timeline = Self.makeTimeline(groups, lineTransitionLeadMs: transitionLeadMs)
         interpolator = .init(initialSourceTimeMs: timeMs)
         lastPresentationTimeMs = timeMs
@@ -605,7 +800,7 @@ final class LyricsViewModel: ObservableObject {
     }
 
     func anchorNeedsCorrection(index: Int, viewportHeight: CGFloat, alignPosition: CGFloat) -> Bool {
-        guard !isUserScrolling, !isHorizontalSwiping,
+        guard !isUserScrolling, !isHorizontalSwiping, lineTransition == nil,
               Date.now.timeIntervalSince(lastAutoScrollDate) >= 1 else { return false }
         // A lazy row outside the realized area also needs to be brought back.
         guard let frame = anchorFrames[index] else { return true }
@@ -632,6 +827,7 @@ final class LyricsViewModel: ObservableObject {
     var allowsAnimatedScroll: Bool { Date.now >= suppressAnimatedScrollUntil }
 
     func layoutDidChange() {
+        cancelLineTransition()
         resumeTask?.cancel()
         autoScrollTask?.cancel()
         resumeTask = nil
@@ -651,6 +847,8 @@ final class LyricsViewModel: ObservableObject {
     }
 
     func beginUserScroll() {
+        if !isUserScrolling { releaseLineTransition() }
+        tapSelection = nil
         resumeTask?.cancel()
         autoScrollTask?.cancel()
         isUserScrolling = true
@@ -658,6 +856,7 @@ final class LyricsViewModel: ObservableObject {
     }
 
     func beginHorizontalSwipe() {
+        cancelLineTransition()
         resumeTask?.cancel()
         autoScrollTask?.cancel()
         isUserScrolling = false
@@ -679,8 +878,11 @@ final class LyricsViewModel: ObservableObject {
     }
 
     func cancelTasks() {
+        cancelLineTransition()
+        tapSelection = nil
         resumeTask?.cancel()
         horizontalSwipeTask?.cancel()
+        tapReconciliationTask?.cancel()
         autoScrollTask?.cancel()
         clockCalibrationTask?.cancel()
         lastAutoScrollTarget = nil
@@ -694,14 +896,15 @@ final class LyricsViewModel: ObservableObject {
         isPlaying: Bool,
         enabled: Bool,
         playbackRate: Double,
-        discontinuityRevision: UInt
+        discontinuityRevision: UInt,
+        authoritative: Bool = false
     ) -> Int64 {
         let seconds = max(frameDate.timeIntervalSince1970, 0)
         let nanoseconds = UInt64(min(seconds * 1_000_000_000, Double(UInt64.max)))
         lastPresentationTimeMs = interpolator.update(
             sourceTimeMs: sourceTimeMs,
             frameNanoseconds: nanoseconds,
-            isPlaying: isPlaying && enabled,
+            isPlaying: isPlaying && enabled && !authoritative,
             playbackRate: playbackRate,
             discontinuityRevision: discontinuityRevision
         )
@@ -716,8 +919,10 @@ final class LyricsViewModel: ObservableObject {
     }
 
     deinit {
+        lineTransitionTask?.cancel()
         resumeTask?.cancel()
         horizontalSwipeTask?.cancel()
+        tapReconciliationTask?.cancel()
         autoScrollTask?.cancel()
         clockCalibrationTask?.cancel()
     }
@@ -752,7 +957,11 @@ private struct LyricRenderStyleSignature: Equatable, Sendable {
 private struct LyricGroupView: View, Equatable {
     let group: LyricGroup
     let currentTimeMs: Int64
+    let isProgressFrozen: Bool
     let sampledAt: Date
+    let mediaClock: LyricMediaClock
+    let currentTimeProvider: (@MainActor () -> Int64)?
+    let clockRevision: UInt
     let active: Bool
     let highlighted: Bool
     let rapidTransition: Bool
@@ -767,24 +976,43 @@ private struct LyricGroupView: View, Equatable {
     let showRomanization: Bool
     let onTap: () -> Void
     @State private var isVisible = true
+    @State private var isHovered = false
 
     private var animatesWords: Bool {
-        !group.main.isLineTimed && active && isVisible && isPlaying && !reduceEffects && style.enableFrameInterpolation
+        !isProgressFrozen && !group.main.isLineTimed && active && isVisible && isPlaying && !reduceEffects && style.enableFrameInterpolation
     }
 
     var body: some View {
-        let targetScale: CGFloat = style.enableScale && !disableTransforms && !reduceEffects && !highlighted && isPlaying ? 0.97 : 1
+        Button(action: onTap) { lyricContent }
+            .buttonStyle(LyricLineButtonStyle(color: style.activeColor, reduceMotion: disableTransforms || reduceEffects))
+            .onHover { isHovered = $0 }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(group.main.text)
+            .accessibilityHint("跳转到此句歌词")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAddTraits(active ? .isSelected : [])
+            .onAppear { isVisible = true }
+            .onDisappear { isVisible = false }
+    }
+
+    private var displayStyle: AppleMusicLyricsStyle {
+        var result = style
+        if isUserScrolling || isHovered { result.inactiveColor = style.activeColor.opacity(0.55) }
+        return result
+    }
+
+    @ViewBuilder private var lyricContent: some View {
+        let targetScale: CGFloat = style.enableScale && !disableTransforms && !reduceEffects && !highlighted && !isUserScrolling && !isHovered && isPlaying ? 0.97 : 1
         // Let the display choose its native cadence, including ProMotion.
         // Only active rows tick here; rapid passages also poll boundaries faster.
         TimelineView(.animation(minimumInterval: nil, paused: !animatesWords)) { frame in
             let elapsed = animatesWords ? max(0, frame.date.timeIntervalSince(sampledAt)) : 0
-            // The boundary clock samples/calibrates the player at 10 Hz
-            // normally, or 60 Hz during rapid passages.
-            // Render frames extrapolate that sample instead of synchronously
-            // querying AVPlayer once per frame for every overlapping row.
-            let time = animatesWords
-                ? currentTimeMs + Int64(elapsed * 1_000 * style.playbackRate)
-                : currentTimeMs
+            // Live playback uses the shared authoritative frame sample. Only
+            // callers without a media provider extrapolate a coarse sample;
+            // overlapping voices never query the player independently.
+            let time = !isProgressFrozen && currentTimeProvider != nil
+                ? mediaClock.sample(provider: currentTimeProvider, fallback: currentTimeMs, revision: clockRevision)
+                : (animatesWords ? currentTimeMs + Int64(elapsed * 1_000 * style.playbackRate) : currentTimeMs)
             groupContent(timeMs: time)
                 // A scroll transaction must never tween the audio-driven
                 // mask or delay insertion of the newly active highlight.
@@ -795,7 +1023,7 @@ private struct LyricGroupView: View, Equatable {
         .padding(.vertical, style.fontSize * 0.4)
         .animation(active || highlighted ? nil : .easeInOut(duration: 0.4)) { content in
             content
-                .foregroundStyle(highlighted ? style.activeColor : style.inactiveColor)
+                .foregroundStyle(highlighted ? style.activeColor : displayStyle.inactiveColor)
                 .opacity(lyricLineOpacity(isHighlighted: highlighted))
         }
         .animation(reduceEffects || disableTransforms ? nil : .spring(response: 0.55, dampingFraction: 0.9).delay(rapidTransition ? 0.06 : 0)) { content in
@@ -804,15 +1032,17 @@ private struct LyricGroupView: View, Equatable {
         // Focus changes precede the first sung word. Remove blur immediately
         // on activation, independently of the line's scale/opacity animation.
         .animation(active || highlighted || disableTransforms || reduceEffects ? nil : .easeInOut(duration: 0.4)) { content in
-            content.blur(radius: active || highlighted ? 0 : blurRadius)
+            content.blur(radius: active || highlighted || isHovered ? 0 : blurRadius)
         }
         .animation(.easeOut(duration: 0.18), value: isUserScrolling)
+        .animation(.easeOut(duration: 0.18), value: isHovered)
         .animation(nil, value: reduceEffects)
         .contentShape(Rectangle())
-        .onTapGesture(perform: onTap)
-        .accessibilityAddTraits(active ? .isSelected : [])
-        .onAppear { isVisible = true }
-        .onDisappear { isVisible = false }
+        .background {
+            RoundedRectangle(cornerRadius: 12)
+                .fill(style.activeColor.opacity(isHovered ? 0.08 : 0))
+                .padding(.horizontal, -8)
+        }
     }
 
     private func groupContent(timeMs: Int64) -> some View {
@@ -842,7 +1072,10 @@ private struct LyricGroupView: View, Equatable {
             && lhs.group.renderBounds == rhs.group.renderBounds
             && lhs.group.mainChunks.count == rhs.group.mainChunks.count
             && lhs.group.backgroundChunks.count == rhs.group.backgroundChunks.count
+            && lhs.clockRevision == rhs.clockRevision
+            && (lhs.currentTimeProvider == nil) == (rhs.currentTimeProvider == nil)
             && lhs.currentTimeMs == rhs.currentTimeMs
+            && lhs.isProgressFrozen == rhs.isProgressFrozen
             && lhs.active == rhs.active
             && lhs.highlighted == rhs.highlighted
             && lhs.rapidTransition == rhs.rapidTransition
@@ -858,7 +1091,7 @@ private struct LyricGroupView: View, Equatable {
 
     @ViewBuilder private func background(attachedAbove: Bool, timeMs: Int64) -> some View {
         if let background = group.background {
-            let revealed = active || !isPlaying
+            let revealed = active || !isPlaying || isUserScrolling
             VerticalLyricRevealLayout(
                 progress: revealed ? 1 : 0,
                 attachedAbove: attachedAbove
@@ -898,7 +1131,7 @@ private struct LyricGroupView: View, Equatable {
                     if line.isLineTimed {
                         Text(chunk.displayText)
                             .font(.system(size: wordStyle.fontSize, weight: .bold, design: .default))
-                            .foregroundStyle(active ? style.activeColor : style.inactiveColor)
+                            .foregroundStyle(active ? style.activeColor : displayStyle.inactiveColor)
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
                         TimedChunkView(
@@ -916,6 +1149,14 @@ private struct LyricGroupView: View, Equatable {
                     }
                 }
             }
+            .animation(
+                disableTransforms || reduceEffects || isUserScrolling ? nil : .spring(response: 0.38, dampingFraction: 0.92),
+                value: group.wrappingWidth
+            )
+            .animation(
+                disableTransforms || reduceEffects || isUserScrolling ? nil : .spring(response: 0.38, dampingFraction: 0.92),
+                value: wordStyle.fontSize
+            )
             if showTranslation, !line.translatedLyric.isEmpty {
                 Text(line.translatedLyric)
                     .font(.system(size: style.secondaryFontSize * scale, weight: .semibold, design: .default))
@@ -934,10 +1175,51 @@ private struct LyricGroupView: View, Equatable {
     }
 
     private func scaledStyle(_ scale: CGFloat) -> AppleMusicLyricsStyle {
-        var value = style
+        var value = displayStyle
         value.fontSize *= scale
         value.secondaryFontSize *= scale
         return value
+    }
+}
+
+/// Keep motion outside the equatable lyric subtree, so a scroll frame does
+/// not remeasure text or reevaluate word masks in inactive rows.
+private struct LyricLineTransitionModifier: ViewModifier {
+    let transition: LyricLineTransition?
+    let index: Int
+    let coordinateSpace: UUID
+    let contentCoordinateSpace: UUID
+    let frameDate: Date
+    let enabled: Bool
+
+    func body(content: Content) -> some View {
+        // One frame date for the entire stack. Independent row clocks could
+        // render adjacent rows at different phases during a busy layout pass.
+        content
+            .visualEffect { effect, geometry in
+                let origin = geometry.frame(in: .named(coordinateSpace)).minY
+                    - geometry.frame(in: .named(contentCoordinateSpace)).minY
+                return effect.offset(y: enabled ? transition?.offset(
+                    index: index, contentOriginY: origin, at: frameDate
+                ) ?? 0 : 0)
+            }
+            .transaction { $0.animation = nil }
+    }
+}
+
+private struct LyricLineButtonStyle: ButtonStyle {
+    let color: Color
+    let reduceMotion: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background {
+                RoundedRectangle(cornerRadius: 12)
+                    .fill(color.opacity(configuration.isPressed ? 0.12 : 0))
+                    .padding(.horizontal, -8)
+            }
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.98 : 1)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: configuration.isPressed)
     }
 }
 
@@ -1183,6 +1465,28 @@ private struct WordProgressMask: View {
             // Keep a single mask identity at 0 and 1 too. At completion the
             // opaque band covers every glyph; no brightness handoff is needed.
             .opacity(progress <= 0 ? 0 : 1)
+        }
+    }
+}
+
+private struct LyricInterludeView: View {
+    let gap: LyricTimeBounds
+    let timeMs: Int64
+    let sampledAt: Date
+    let playbackRate: Double
+    let updatesFrames: Bool
+    let color: Color
+    let trailing: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: nil, paused: !updatesFrames)) { frame in
+            let elapsed = updatesFrames ? max(0, frame.date.timeIntervalSince(sampledAt)) : 0
+            let delta = Int64(elapsed * 1_000 * playbackRate)
+            let animation = calculateInterludeDotsAnimation(
+                elapsedMs: timeMs - gap.startTime + delta,
+                durationMs: gap.endTime - gap.startTime
+            )
+            InterludeDotsView(animation: animation, color: color, trailing: trailing)
         }
     }
 }

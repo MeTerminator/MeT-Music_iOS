@@ -70,21 +70,20 @@ final class AudioPlayer: ObservableObject {
         player.automaticallyWaitsToMinimizeStalling = true
         player.actionAtItemEnd = .pause
         timeObserver = player.addPeriodicTimeObserver(
-            // UI consumers only need a coarse source clock; the lyric view
-            // interpolates this internally at display cadence. Publishing at
-            // 10 Hz avoids invalidating the entire app hierarchy every frame.
+            // General UI position remains coarse. Lyrics separately sample a
+            // shared authoritative media clock at display cadence, without
+            // publishing the entire app hierarchy on every frame.
             forInterval: CMTime(value: 1, timescale: 10),
             queue: .main
-        ) { [weak self] time in
-            Task { @MainActor [weak self] in
-                guard let self else { return }
-                let seconds = time.seconds
-                if seconds.isFinite,
-                   playbackClockIsUsable,
-                   Date.now >= suppressPeriodicPositionUpdatesUntil {
-                    positionMs = max(0, Int64((seconds * 1_000).rounded()))
+        ) { [weak self] _ in
+            // The observer is explicitly delivered on .main. Read the current
+            // engine now: a queued timestamp may belong to an earlier item.
+            MainActor.assumeIsolated {
+                guard let self, self.filePlayer == nil, self.player.currentItem != nil else { return }
+                if self.playbackClockIsUsable, Date.now >= self.suppressPeriodicPositionUpdatesUntil {
+                    self.positionMs = self.playerPositionMs(fallback: self.positionMs)
                 }
-                isPlaying = player.timeControlStatus == .playing
+                self.isPlaying = self.player.timeControlStatus == .playing
             }
         }
     }
@@ -172,6 +171,8 @@ final class AudioPlayer: ObservableObject {
                 guard request == generation else { return false }
             }
             clockIsAuthoritative = true
+            positionMs = playerPositionMs(fallback: startPositionMs)
+            playbackDiscontinuityRevision &+= 1
             if autoPlay { player.play(); isPlaying = true }
             return true
         } catch {
@@ -255,6 +256,7 @@ final class AudioPlayer: ObservableObject {
         clockIsAuthoritative = hasLoadedMedia
         suppressPeriodicPositionUpdatesUntil = .distantPast
         positionMs = playerPositionMs(fallback: positionMs)
+        playbackDiscontinuityRevision &+= 1
     }
 
     /// Seeks with zero tolerance, checks where the player actually ended up and
@@ -283,8 +285,8 @@ final class AudioPlayer: ObservableObject {
         clockIsAuthoritative = hasLoadedMedia
         suppressPeriodicPositionUpdatesUntil = Date.now.addingTimeInterval(0.15)
         let actual = playerPositionMs(fallback: target)
-        if !landed { playbackDiscontinuityRevision &+= 1 }
         positionMs = actual
+        playbackDiscontinuityRevision &+= 1
         return landed
     }
 
@@ -320,15 +322,14 @@ final class AudioPlayer: ObservableObject {
         return playerPositionMs(fallback: positionMs)
     }
 
-    /// Re-anchors lyric interpolation to AVPlayer's authoritative clock at a
-    /// lyric-line boundary. This is deliberately low frequency and is skipped
+    /// Refreshes the coarse UI position from the authoritative clock at a
+    /// lyric-line boundary. This is not a playback discontinuity. This is deliberately low frequency and is skipped
     /// while a seek is still pending, because seek completion performs its own
     /// authoritative reconciliation.
     func calibrateLyricClockAtLineBoundary() {
         guard playbackClockIsUsable else { return }
         let actualPosition = playerPositionMs(fallback: positionMs)
         positionMs = actualPosition
-        playbackDiscontinuityRevision &+= 1
         suppressPeriodicPositionUpdatesUntil = Date.now.addingTimeInterval(0.05)
     }
 
@@ -409,6 +410,7 @@ final class AudioPlayer: ObservableObject {
         clockIsAuthoritative = true
         suppressPeriodicPositionUpdatesUntil = .distantPast
         positionMs = playerPositionMs(fallback: startPositionMs)
+        playbackDiscontinuityRevision &+= 1
         if autoPlay {
             file.play()
             isPlaying = file.isPlaying
@@ -430,7 +432,7 @@ final class AudioPlayer: ObservableObject {
         // A compressed file can only start on a packet boundary, so the exact
         // landing point is checked the same way the streaming engine is.
         let landed = seekLandedOnTarget(finished: true, actualPositionMs: actual, targetPositionMs: target)
-        if !landed { playbackDiscontinuityRevision &+= 1 }
+        playbackDiscontinuityRevision &+= 1
         return landed
     }
 

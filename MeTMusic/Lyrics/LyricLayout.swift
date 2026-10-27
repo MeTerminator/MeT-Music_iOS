@@ -25,6 +25,7 @@ struct LyricWordChunk: Identifiable, Hashable {
         self.id = id
         self.words = words
         text = words.map(\.word).joined()
+        forcesBreakAfter = text.contains(where: \.isNewline)
         isSingleCJKCharacter = text.count == 1 && isCJK(text)
         displayText = (displayOverride ?? words.map(maskedLyricWord).joined()) + displaySuffix
         characters = displayText.map(String.init)
@@ -499,6 +500,8 @@ struct BalancedLyricLayout: Layout {
             let left = rows[index]
             if forcedBreaks.indices.contains(left.upperBound - 1), forcedBreaks[left.upperBound - 1] { continue }
             let right = rows[index + 1]
+            if left.upperBound < right.lowerBound,
+               (left.upperBound..<right.lowerBound).contains(where: { forcedBreaks.indices.contains($0) && forcedBreaks[$0] }) { continue }
             // A break already on whitespace needs no adjustment.
             guard left.upperBound == right.lowerBound,
                   isSingleCharacter(left.upperBound - 1),

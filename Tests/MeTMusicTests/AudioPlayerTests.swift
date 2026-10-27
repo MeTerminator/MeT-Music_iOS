@@ -24,6 +24,38 @@ import Testing
         return url
     }
 
+    @Test func realMediaSeeksAndReloadsReanchorLyricsIncludingSmallMoves() async throws {
+        let player = AudioPlayer()
+        defer { player.stop() }
+        let file = try makeAudioFile()
+        #expect(await player.load(url: file, autoPlay: false))
+        let groups = (0..<4).map { index in
+            let start = Int64(index * 1_000)
+            return LyricGroup(main: .init(words: [.init(startTime: start, endTime: start + 1_000, word: "line")], startTime: start, endTime: start + 1_000))
+        }
+        let model = LyricsViewModel(groups: groups, timeMs: 0)
+        for target: Int64 in [900, 1_100, 1_050, 2_600, 200, 3_100] {
+            let before = player.playbackDiscontinuityRevision
+            #expect(await player.seekExactly(to: target))
+            #expect(player.playbackDiscontinuityRevision >= before + 2)
+            let actual = player.lyricClockPositionMs()
+            model.reanchorPlayback(timeMs: actual, revision: player.playbackDiscontinuityRevision)
+            let display = model.presentationTime(sourceTimeMs: actual, frameDate: .now, isPlaying: false, enabled: true, playbackRate: 1, discontinuityRevision: player.playbackDiscontinuityRevision, authoritative: true)
+            let snapshot = model.sync(timeMs: display)
+            #expect(display == actual)
+            #expect(snapshot.isSeeking)
+            #expect(snapshot.playingIndices == [Int(actual / 1_000)])
+            #expect(snapshot.scrollTargetIndex == Int(actual / 1_000))
+        }
+        let revision = player.playbackDiscontinuityRevision
+        player.calibrateLyricClockAtLineBoundary()
+        #expect(player.playbackDiscontinuityRevision == revision)
+        #expect(await player.load(url: file, autoPlay: false, startPositionMs: 500))
+        #expect(player.playbackDiscontinuityRevision > revision)
+        model.reanchorPlayback(timeMs: player.lyricClockPositionMs(), revision: player.playbackDiscontinuityRevision)
+        #expect(model.sync(timeMs: player.lyricClockPositionMs()).playingIndices == [0])
+    }
+
     @Test func completeLocalFilesPlayThroughTheFileEngine() async throws {
         let player = AudioPlayer()
         defer { player.stop() }

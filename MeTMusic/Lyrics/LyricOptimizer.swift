@@ -20,7 +20,10 @@ public func optimizeLyricLines(
         if options.normalizeSpaces {
             result.words = line.words.map { word in
                 var value = word
-                value.word = word.word.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                value.word = word.word
+                    .replacingOccurrences(of: "\r\n", with: "\n")
+                    .replacingOccurrences(of: "\r", with: "\n")
+                    .replacingOccurrences(of: #"[^\S\n\u2028\u2029]+"#, with: " ", options: .regularExpression)
                 return value
             }
         }
