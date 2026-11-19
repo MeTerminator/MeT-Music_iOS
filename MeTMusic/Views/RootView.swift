@@ -3,6 +3,7 @@ import Observation
 
 struct RootView: View {
     @EnvironmentObject private var store: AppStore
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     @ViewBuilder
     var body: some View {
@@ -13,11 +14,21 @@ struct RootView: View {
             .allowsHitTesting(!store.isPlayerPresented)
             .accessibilityHidden(store.isPlayerPresented)
             .overlay {
-                if store.isPlayerPresented {
-                    PlayerPresentationView(onDismiss: { store.isPlayerPresented = false })
-                        .allowsHitTesting(true)
-                        .accessibilityHidden(false)
+                GeometryReader { geometry in
+                    if store.isPlayerPresented {
+                        let travel = geometry.size.height + geometry.safeAreaInsets.top + geometry.safeAreaInsets.bottom
+                        PlayerPresentationView(travel: travel, usesFade: usesFade) {
+                            store.isPlayerPresented = false
+                        }
+                        .transition(.asymmetric(
+                            insertion: usesFade ? .opacity : .offset(y: travel),
+                            removal: .identity
+                        ))
+                    }
                 }
+                .animation(store.isPlayerPresented ? playerSurfaceAnimation(usesFade: usesFade) : nil,
+                           value: store.isPlayerPresented)
+                .allowsHitTesting(store.isPlayerPresented)
             }
         #if os(macOS)
         // Keep title-bar visibility and its safe-area reservation stable across
@@ -27,6 +38,14 @@ struct RootView: View {
         .background(MacWindowContentBoundary(
             artworkURL: store.currentSong?.bestCoverURL
         ))
+        #endif
+    }
+
+    private var usesFade: Bool {
+        #if os(macOS)
+        true
+        #else
+        reduceMotion
         #endif
     }
 
@@ -86,28 +105,26 @@ struct RootView: View {
 @MainActor
 @Observable
 private final class PlayerPresentationMotion {
-    enum Phase { case hidden, opening, open, closing }
-    var phase = Phase.hidden
+    var isClosing = false
     var dragOffset: CGFloat = 0
 }
 
 private struct PlayerPresentationView: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var motion = PlayerPresentationMotion()
+    let travel: CGFloat
+    let usesFade: Bool
     let onDismiss: () -> Void
 
     var body: some View {
-        GeometryReader { geometry in
-            PlayerView(
-                onDismiss: close,
-                onDismissDrag: { motion.dragOffset = $0 }
-            )
-            .modifier(PlayerSurfaceMotion(
-                motion: motion,
-                travel: geometry.size.height + geometry.safeAreaInsets.top + geometry.safeAreaInsets.bottom,
-                reduceMotion: usesFadeTransition
-            ))
-        }
+        PlayerView(
+            onDismiss: close,
+            onDismissDrag: { motion.dragOffset = $0 }
+        )
+        .modifier(PlayerSurfaceMotion(
+            motion: motion,
+            travel: travel,
+            reduceMotion: usesFade
+        ))
         #if os(macOS)
         // Keep the player and its background below the persistent toolbar.
         .clipped()
@@ -120,40 +137,22 @@ private struct PlayerPresentationView: View {
             }
         }
         #endif
-        .task {
-            // Mount and lay out the surface offscreen before beginning its entrance.
-            await Task.yield()
-            guard !Task.isCancelled, motion.phase == .hidden else { return }
-            withAnimation(animation, completionCriteria: .removed) {
-                motion.phase = .opening
-            } completion: {
-                if motion.phase == .opening { motion.phase = .open }
-            }
-        }
-    }
-
-    private var usesFadeTransition: Bool {
-        #if os(macOS)
-        true
-        #else
-        reduceMotion
-        #endif
-    }
-
-    private var animation: Animation {
-        usesFadeTransition ? .easeOut(duration: 0.18) : .spring(response: 0.38, dampingFraction: 1)
     }
 
     private func close() {
-        guard motion.phase == .open else { return }
+        guard !motion.isClosing else { return }
         // Animate the same offset from its current drag position to offscreen;
         // remove the view only after the animation has finished.
-        withAnimation(animation, completionCriteria: .removed) {
-            motion.phase = .closing
+        withAnimation(playerSurfaceAnimation(usesFade: usesFade), completionCriteria: .removed) {
+            motion.isClosing = true
         } completion: {
             onDismiss()
         }
     }
+}
+
+private func playerSurfaceAnimation(usesFade: Bool) -> Animation {
+    usesFade ? .easeOut(duration: 0.18) : .spring(duration: 0.38, bounce: 0)
 }
 
 private struct PlayerSurfaceMotion: ViewModifier {
@@ -162,11 +161,11 @@ private struct PlayerSurfaceMotion: ViewModifier {
     let reduceMotion: Bool
 
     func body(content: Content) -> some View {
-        let offscreen = motion.phase == .hidden || motion.phase == .closing
+        let offscreen = motion.isClosing
         content
             .offset(y: reduceMotion ? 0 : (offscreen ? travel : motion.dragOffset))
             .opacity(reduceMotion && offscreen ? 0 : 1)
-            .allowsHitTesting(motion.phase == .open)
-            .accessibilityHidden(motion.phase != .open)
+            .allowsHitTesting(!motion.isClosing)
+            .accessibilityHidden(motion.isClosing)
     }
 }

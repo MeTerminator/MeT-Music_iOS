@@ -1,4 +1,5 @@
 import SwiftUI
+import Observation
 #if os(iOS)
 import UIKit
 #endif
@@ -16,6 +17,9 @@ func playerPageTarget(
 ) -> Int {
     let distanceThreshold = max(52, pageWidth * 0.14)
     let projectionThreshold = max(120, pageWidth * 0.32)
+    if abs(projectedTranslation - translation) > 60 && translation * projectedTranslation < 0 {
+        return currentPage
+    }
     if translation <= -distanceThreshold || projectedTranslation <= -projectionThreshold {
         return 1
     }
@@ -38,6 +42,7 @@ struct PlayerView: View {
     @StateObject private var model = PlayerViewModel()
     @GestureState private var dismissGestureActive = false
     @GestureState private var pageGestureActive = false
+    @State private var pageMotion = PlayerPageMotion()
     var onDismiss: (() -> Void)?
     var onDismissDrag: (CGFloat) -> Void
 
@@ -80,15 +85,19 @@ struct PlayerView: View {
             }
         }
         .onChange(of: pageGestureActive) { _, active in
-            if !active && model.pageDragOffset != 0 {
-                withAnimation(.interactiveSpring(response: 0.32, dampingFraction: 0.88)) {
-                    model.pageDragOffset = 0
-                }
-                model.endPagingAfterSettle()
+            if !active {
+                if pageMotion.axis == .horizontal { settlePage(on: model.page) }
+                pageMotion.axis = nil
             }
         }
         .onChange(of: model.isControlDragging) { _, dragging in
-            if dragging { onDismissDrag(0) }
+            if dragging {
+                if pageMotion.axis == .horizontal {
+                    settlePage(on: model.page)
+                    pageMotion.axis = .vertical
+                }
+                onDismissDrag(0)
+            }
         }
         .onChange(of: store.currentSong?.id) { _, _ in
             model.scrubbing = false
@@ -112,7 +121,7 @@ struct PlayerView: View {
                 .frame(width: size.width, height: size.height)
         }
         .frame(width: size.width * 2, height: size.height, alignment: .leading)
-        .offset(x: -CGFloat(model.page) * size.width + model.pageDragOffset)
+        .modifier(PlayerPageOffset(page: model.page, width: size.width, motion: pageMotion))
         .frame(width: size.width, height: size.height, alignment: .leading)
         .contentShape(Rectangle())
         .simultaneousGesture(pageGesture(pageWidth: size.width))
@@ -120,30 +129,46 @@ struct PlayerView: View {
     }
 
     private func pageGesture(pageWidth: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 8)
+        DragGesture(minimumDistance: 8, coordinateSpace: .global)
             .updating($pageGestureActive) { _, active, _ in active = true }
             .onChanged { value in
                 guard !model.isControlDragging, !model.isDismissing else { return }
-                guard abs(value.translation.width) > abs(value.translation.height) * 1.12 else { return }
-                model.beginPaging()
                 let raw = value.translation.width
+                if pageMotion.axis == nil {
+                    pageMotion.axis = abs(raw) > abs(value.translation.height) * 1.12 ? .horizontal : .vertical
+                    guard pageMotion.axis == .horizontal else { return }
+                    pageMotion.generation += 1
+                    pageMotion.interrupted = model.isPaging
+                    model.isPaging = true
+                }
+                guard pageMotion.axis == .horizontal else { return }
                 let atBoundary = (model.page == 0 && raw > 0) || (model.page == 1 && raw < 0)
-                model.pageDragOffset = atBoundary ? raw * 0.18 : raw
+                // Retarget an in-flight spring from its visible position on a second swipe.
+                withAnimation(pageMotion.interrupted ? .interactiveSpring(response: 0.12, dampingFraction: 1) : nil) {
+                    pageMotion.offset = atBoundary ? raw * 0.18 : raw
+                }
             }
             .onEnded { value in
-                guard model.isPaging else { return }
+                defer { pageMotion.axis = nil }
+                guard pageMotion.axis == .horizontal else { return }
                 let target = playerPageTarget(
                     currentPage: model.page,
                     translation: value.translation.width,
                     projectedTranslation: value.predictedEndTranslation.width,
                     pageWidth: pageWidth
                 )
-                withAnimation(.interactiveSpring(response: 0.32, dampingFraction: 0.88, blendDuration: 0.08)) {
-                    model.page = target
-                    model.pageDragOffset = 0
-                }
-                model.endPagingAfterSettle()
+                settlePage(on: target)
             }
+    }
+
+    private func settlePage(on target: Int) {
+        let generation = pageMotion.generation
+        withAnimation(.spring(duration: 0.32, bounce: 0), completionCriteria: .removed) {
+            model.page = target
+            pageMotion.offset = 0
+        } completion: {
+            if pageMotion.generation == generation { model.isPaging = false }
+        }
     }
 
     private func sideBySidePlayer(in size: CGSize) -> some View {
@@ -649,6 +674,24 @@ private struct PlayerScrubber: View {
     }
 }
 
+@Observable
+private final class PlayerPageMotion {
+    var offset: CGFloat = 0
+    var axis: Axis?
+    var generation = 0
+    var interrupted = false
+}
+
+private struct PlayerPageOffset: ViewModifier {
+    let page: Int
+    let width: CGFloat
+    let motion: PlayerPageMotion
+
+    func body(content: Content) -> some View {
+        content.offset(x: -CGFloat(page) * width + motion.offset)
+    }
+}
+
 @MainActor
 private final class PlayerViewModel: ObservableObject {
     @Published var page = 0
@@ -658,39 +701,18 @@ private final class PlayerViewModel: ObservableObject {
     @Published var showingQueue = false
     @Published var showTranslation = true
     @Published var isDismissing = false
-    @Published var pageDragOffset: CGFloat = 0
-    @Published private(set) var isPaging = false
+    @Published var isPaging = false
     @Published private(set) var isControlDragging = false
-    private var pagingSettleTask: Task<Void, Never>?
-
-    func beginPaging() {
-        guard !isControlDragging else { return }
-        pagingSettleTask?.cancel()
-        if !isPaging { isPaging = true }
-    }
 
     func beginControlInteraction() {
-        pagingSettleTask?.cancel()
         isControlDragging = true
         isDismissing = false
-        isPaging = false
-        pageDragOffset = 0
     }
 
     func endControlInteraction() {
         isControlDragging = false
     }
 
-    func endPagingAfterSettle() {
-        pagingSettleTask?.cancel()
-        pagingSettleTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .milliseconds(320))
-            guard !Task.isCancelled else { return }
-            self?.isPaging = false
-        }
-    }
-
-    deinit { pagingSettleTask?.cancel() }
 }
 
 struct QueueView: View {

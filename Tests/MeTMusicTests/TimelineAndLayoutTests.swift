@@ -767,6 +767,11 @@ import Testing
         #expect(playerPageTarget(currentPage: 0, translation: 120, projectedTranslation: 180, pageWidth: 390) == 0)
     }
 
+    @Test func reversingAPageSwipeBeforeReleaseKeepsTheCurrentPage() {
+        #expect(playerPageTarget(currentPage: 0, translation: -90, projectedTranslation: 70, pageWidth: 390) == 0)
+        #expect(playerPageTarget(currentPage: 1, translation: 90, projectedTranslation: -70, pageWidth: 390) == 1)
+    }
+
     @Test func lyricBoundaryPollingIsCoarseAndSleepsWhenInactive() {
         #expect(abs(lyricTimelineInterval(largeScreenOptimizations: true, updatesFrames: true) - 1.0 / 10.0) < 0.0001)
         #expect(abs(lyricTimelineInterval(largeScreenOptimizations: false, updatesFrames: true) - 1.0 / 10.0) < 0.0001)
