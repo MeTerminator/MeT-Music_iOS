@@ -211,6 +211,15 @@ public struct AppleMusicLyricsView: View {
                             guard request.sourceRevision == model.sourceRevision else { return }
                             followLyrics(request, proxy: proxy, groups: groups, viewport: geometry.size)
                         }
+                        .onPreferenceChange(LyricFollowAnchorPreference.self) { anchor in
+                            guard sourceRevision == model.sourceRevision, isActive, !isPageTransitioning,
+                                  lyricViewportIsUsable(geometry.size),
+                                  let index = model.updateFollowAnchor(
+                                      anchor, viewportY: geometry.size.height * style.alignPosition
+                                  ),
+                                  groups.indices.contains(index) else { return }
+                            scrollImmediately(proxy: proxy, to: groups[index].id)
+                        }
                     }
                 }
                 .coordinateSpace(name: model.scrollCoordinateSpace)
@@ -408,10 +417,18 @@ public struct AppleMusicLyricsView: View {
             // measuring every previously realized row while browsing.
             if abs(index - snapshot.scrollTargetIndex) <= 8 {
                 GeometryReader { row in
-                    Color.clear.preference(
-                        key: LyricAnchorFramePreference.self,
-                        value: [index: row.frame(in: .named(model.scrollCoordinateSpace))]
-                    )
+                    let frame = row.frame(in: .named(model.scrollCoordinateSpace))
+                    Color.clear
+                        .preference(key: LyricAnchorFramePreference.self, value: [index: frame])
+                        .preference(
+                            key: LyricFollowAnchorPreference.self,
+                            value: index == snapshot.scrollTargetIndex ? LyricFollowAnchor(
+                                index: index,
+                                contentY: row.frame(in: .named(model.contentCoordinateSpace)).minY
+                                    + frame.height * style.alignPosition,
+                                viewportY: frame.minY + frame.height * style.alignPosition
+                            ) : nil
+                        )
                 }
             }
         }
@@ -597,6 +614,19 @@ private struct LyricAnchorFramePreference: PreferenceKey {
     }
 }
 
+struct LyricFollowAnchor: Equatable, Sendable {
+    let index: Int
+    let contentY: CGFloat
+    let viewportY: CGFloat
+}
+
+private struct LyricFollowAnchorPreference: PreferenceKey {
+    static let defaultValue: LyricFollowAnchor? = nil
+    static func reduce(value: inout LyricFollowAnchor?, nextValue: () -> LyricFollowAnchor?) {
+        if let next = nextValue() { value = next }
+    }
+}
+
 private struct LyricContentOriginPreference: PreferenceKey {
     static let defaultValue: CGFloat? = nil
     static func reduce(value: inout CGFloat?, nextValue: () -> CGFloat?) {
@@ -639,6 +669,7 @@ final class LyricsViewModel: ObservableObject {
     let contentCoordinateSpace = UUID()
     var contentOriginY: CGFloat?
     var anchorFrames: [Int: CGRect] = [:]
+    private var followAnchor: LyricFollowAnchor?
     private var lastAutoScrollDate = Date.distantPast
     private var lastAutoScrollTarget: Int?
     private var lastCalibratedLineIndex: Int?
@@ -824,6 +855,21 @@ final class LyricsViewModel: ObservableObject {
         return abs(frame.minY - expectedTop) > 4
     }
 
+    func updateFollowAnchor(_ anchor: LyricFollowAnchor?, viewportY: CGFloat) -> Int? {
+        let previous = followAnchor
+        followAnchor = anchor
+        // Animated heights can move the scroll target after scrollTo. Update
+        // the native anchor while the same step still supplies visual motion.
+        // Native scrolling by itself only changes the viewport coordinate.
+        guard let anchor, let previous, previous.index == anchor.index,
+              previous.contentY != anchor.contentY,
+              lastAutoScrollTarget == anchor.index,
+              lineTransition?.focusIndex == anchor.index,
+              !isUserScrolling, !isHorizontalSwiping,
+              abs(anchor.viewportY - viewportY) > 1 else { return nil }
+        return anchor.index
+    }
+
     func scheduleAutoScroll(index: Int, force: Bool = false, action: @escaping @MainActor () -> Void) {
         guard force || lastAutoScrollTarget != index else { return }
         autoScrollTask?.cancel()
@@ -844,6 +890,7 @@ final class LyricsViewModel: ObservableObject {
 
     func layoutDidChange() {
         cancelLineTransition()
+        followAnchor = nil
         resumeTask?.cancel()
         autoScrollTask?.cancel()
         resumeTask = nil

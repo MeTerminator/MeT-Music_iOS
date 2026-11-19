@@ -335,6 +335,32 @@ import Testing
         #expect(!model.anchorNeedsCorrection(index: 0, viewportHeight: 500, alignPosition: 0.2))
     }
 
+    @Test(arguments: [CGFloat(-42), CGFloat(32)])
+    @MainActor func lyricStepFollowsChangingBackgroundVocalHeight(layoutShift: CGFloat) async {
+        let model = LyricsViewModel(groups: [], timeMs: 0)
+        model.contentOriginY = -100
+        model.anchorFrames = [1: CGRect(x: 0, y: 200, width: 300, height: 80)]
+        model.beginLineTransition(index: 0, enabled: true)
+        model.scheduleAutoScroll(index: 1) {
+            #expect(model.beginLineTransition(index: 1, enabled: true))
+        }
+        await model.autoScrollTask?.value
+
+        let step = model.lineTransition
+        #expect(model.updateFollowAnchor(.init(index: 1, contentY: 300, viewportY: 120), viewportY: 120) == nil)
+        let resized = LyricFollowAnchor(index: 1, contentY: 300 + layoutShift, viewportY: 120 + layoutShift)
+        #expect(model.updateFollowAnchor(resized, viewportY: 120) == 1)
+        #expect(model.lineTransition == step)
+
+        // The native reanchor changes only the viewport coordinate.
+        let realigned = LyricFollowAnchor(index: 1, contentY: resized.contentY, viewportY: 120)
+        #expect(model.updateFollowAnchor(realigned, viewportY: 120) == nil)
+        let stillMoving = LyricFollowAnchor(index: 1, contentY: resized.contentY, viewportY: 103)
+        #expect(model.updateFollowAnchor(stillMoving, viewportY: 120) == nil)
+        model.beginUserScroll()
+        #expect(model.updateFollowAnchor(.init(index: 1, contentY: 300, viewportY: 103), viewportY: 120) == nil)
+    }
+
     @Test func syllableChunksUseContinuousProgress() {
         let words = [
             LyricWord(startTime: 0, endTime: 300, word: "hel"),
