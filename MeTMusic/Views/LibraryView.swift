@@ -8,6 +8,8 @@ import AppKit
 
 struct LibraryView: View {
     @EnvironmentObject private var store: AppStore
+    @State private var isAddPlaylistPresented = false
+    @State private var playlistIDInput = ""
 
     private enum Destination: Hashable { case together, settings, cached }
 
@@ -34,6 +36,13 @@ struct LibraryView: View {
                                 .padding(4)
                             }
                             .buttonStyle(.plain)
+                            .contextMenu {
+                                if store.isCustomPlaylist(playlist) {
+                                    Button("移除自定义歌单", systemImage: "trash", role: .destructive) {
+                                        store.removeCustomPlaylist(playlist)
+                                    }
+                                }
+                            }
                         }
                     }
                     .padding(.horizontal, 16)
@@ -58,6 +67,22 @@ struct LibraryView: View {
                 case .cached: CachedAudioView()
                 }
             }
+            .alert("添加自定义歌单", isPresented: $isAddPlaylistPresented) {
+                TextField("歌单 ID", text: $playlistIDInput)
+                    #if os(iOS)
+                    .keyboardType(.numberPad)
+                    #endif
+                Button("取消", role: .cancel) {
+                    playlistIDInput = ""
+                }
+                Button("添加") {
+                    let id = playlistIDInput
+                    playlistIDInput = ""
+                    Task { await store.addCustomPlaylist(id: id) }
+                }
+            } message: {
+                Text("输入\(store.selectedPlatform.title)歌单 ID")
+            }
         }
     }
 
@@ -71,6 +96,14 @@ struct LibraryView: View {
             }
             Spacer(minLength: 0)
             if store.loadingPlaylists, !store.playlists.isEmpty { ProgressView() }
+            Button {
+                playlistIDInput = ""
+                isAddPlaylistPresented = true
+            } label: {
+                Image(systemName: "plus").frame(width: 44, height: 44)
+            }
+            .accessibilityLabel("添加歌单")
+            .help("添加歌单")
             NavigationLink(value: Destination.together) {
                 Image(systemName: "person.2.wave.2").frame(width: 44, height: 44)
             }

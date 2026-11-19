@@ -37,6 +37,8 @@ final class AppStore: ObservableObject {
     @Published var playlistTracks: [String: [Song]] = [:]
     @Published var loadingPlaylists = false
     @Published var loadingPlaylistIDs = Set<String>()
+    private var userPlaylists: [Playlist] = []
+    private var customPlaylistsByPlatform: [MusicPlatform: [Playlist]] = [:]
 
     @Published var queue: [Song] = []
     @Published var currentIndex = -1
@@ -84,6 +86,7 @@ final class AppStore: ObservableObject {
         bindPlayer()
         _ = nowPlaying
         if qqID.isEmpty, accountIDs[.netease] != nil { selectPlatform(.netease) }
+        rebuildPlaylists()
         if !qqID.isEmpty {
             isLoggedIn = true
             Task { await loadUserPlaylists() }
@@ -98,8 +101,9 @@ final class AppStore: ObservableObject {
         isLoggedIn = !qqID.isEmpty
         nickname = defaults.string(forKey: "\(platform.rawValue)_nickname") ?? (qqID.isEmpty ? "未登录" : qqID)
         avatarURL = defaults.string(forKey: "\(platform.rawValue)_avatar") ?? ""
-        playlists = []
+        userPlaylists = []
         loadingPlaylists = false
+        rebuildPlaylists()
         Task { await loadUserPlaylists() }
     }
 
@@ -148,18 +152,94 @@ final class AppStore: ObservableObject {
         loadingPlaylists = true
         defer { if request == accountRequest { loadingPlaylists = false } }
         if let cached = await cache.playlists(uid: platform.key(uid)), request == accountRequest {
-            playlists = cached.map { var list = $0; list.source = platform; return list }
+            userPlaylists = cached.map { var list = $0; list.source = platform; return list }
+            rebuildPlaylists()
         }
         do {
             let response = try await api.userPlaylists(uid: uid, platform: platform)
             let lists = response.playlist.map { var list = $0; list.source = platform; return list }
             try? await cache.savePlaylists(lists, uid: platform.key(uid))
             guard request == accountRequest else { return }
-            playlists = lists
+            userPlaylists = lists
+            rebuildPlaylists()
             nickname = response.username ?? uid
             avatarURL = response.avatarUrl ?? ""
         } catch {
-            if request == accountRequest, playlists.isEmpty { showToast("载入歌单失败：\(error.localizedDescription)") }
+            if request == accountRequest, userPlaylists.isEmpty { showToast("载入歌单失败：\(error.localizedDescription)") }
+        }
+    }
+
+    func isCustomPlaylist(_ playlist: Playlist) -> Bool {
+        customPlaylistsByPlatform[playlist.source]?.contains(where: { $0.id == playlist.id }) ?? false
+    }
+
+    @discardableResult
+    func addCustomPlaylist(id: String) async -> Bool {
+        let value = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty, value.allSatisfy({ $0.isASCII && $0.isNumber }) else {
+            showToast("请输入有效的数字歌单 ID")
+            return false
+        }
+        let platform = selectedPlatform
+        if (customPlaylistsByPlatform[platform] ?? []).contains(where: { $0.id == value })
+            || userPlaylists.contains(where: { $0.id == value }) {
+            showToast("该歌单已在列表中")
+            return true
+        }
+        loadingPlaylists = true
+        defer { loadingPlaylists = false }
+        do {
+            let response = try await api.playlistDetail(id: value, platform: platform)
+            var playlist = response.playlist
+            if playlist.id.isEmpty { playlist.id = value }
+            playlist.source = platform
+            var custom = customPlaylistsByPlatform[platform] ?? []
+            custom.removeAll { $0.id == playlist.id }
+            custom.insert(playlist, at: 0)
+            customPlaylistsByPlatform[platform] = custom
+            saveCustomPlaylists(for: platform)
+            if selectedPlatform == platform {
+                rebuildPlaylists()
+            }
+            showToast("已添加歌单：\(playlist.name)")
+            return true
+        } catch {
+            showToast("添加歌单失败：\(error.localizedDescription)")
+            return false
+        }
+    }
+
+    func removeCustomPlaylist(_ playlist: Playlist) {
+        let platform = playlist.source
+        guard var custom = customPlaylistsByPlatform[platform] else { return }
+        custom.removeAll { $0.id == playlist.id }
+        customPlaylistsByPlatform[platform] = custom
+        saveCustomPlaylists(for: platform)
+        if selectedPlatform == platform {
+            rebuildPlaylists()
+        }
+        showToast("已移除歌单：\(playlist.name)")
+    }
+
+    private func rebuildPlaylists() {
+        let custom = customPlaylistsByPlatform[selectedPlatform] ?? []
+        var seen = Set<String>()
+        var merged: [Playlist] = []
+        for list in custom + userPlaylists {
+            var item = list
+            item.source = selectedPlatform
+            if seen.insert(item.cacheKey).inserted {
+                merged.append(item)
+            }
+        }
+        playlists = merged
+    }
+
+    private func saveCustomPlaylists(for platform: MusicPlatform) {
+        let key = "custom_playlists_\(platform.rawValue)"
+        let list = customPlaylistsByPlatform[platform] ?? []
+        if let data = try? JSONEncoder().encode(list) {
+            defaults.set(data, forKey: key)
         }
     }
 
@@ -529,6 +609,10 @@ final class AppStore: ObservableObject {
         neteaseQuality = defaults.string(forKey: "netease_sound_quality") ?? "exhigh"
         for platform in MusicPlatform.allCases {
             if let uid = defaults.string(forKey: platform == .qq ? "qq_id" : "netease_id"), !uid.isEmpty { accountIDs[platform] = uid }
+            if let data = defaults.data(forKey: "custom_playlists_\(platform.rawValue)"),
+               let decoded = try? JSONDecoder().decode([Playlist].self, from: data) {
+                customPlaylistsByPlatform[platform] = decoded.map { var item = $0; item.source = platform; return item }
+            }
         }
         soundQuality = defaults.string(forKey: "sound_quality") ?? "hq"
         playbackMode = PlaybackMode(rawValue: defaults.string(forKey: "playback_mode") ?? "") ?? .sequence
