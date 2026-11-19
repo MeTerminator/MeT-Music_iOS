@@ -1522,9 +1522,9 @@ private struct InterludeDotsView: View {
     let trailing: Bool
 
     var body: some View {
-        HStack(spacing: 4) {
+        HStack(spacing: 8.4) {
             ForEach(0..<3) { index in
-                Circle().fill(color).frame(width: 8, height: 8).opacity(animation.opacities[index])
+                Circle().fill(color).frame(width: 16.8, height: 16.8).opacity(animation.opacities[index])
             }
         }
         .frame(maxWidth: .infinity, alignment: trailing ? .trailing : .leading)
