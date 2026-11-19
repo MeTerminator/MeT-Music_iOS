@@ -735,6 +735,17 @@ struct QueueView: View {
                     .buttonStyle(.plain)
                     .id(index)
                 }
+                .task { @MainActor in
+                    // Let the list register its rows before resolving the scroll target.
+                    await Task.yield()
+                    guard !Task.isCancelled, store.queue.indices.contains(store.currentIndex) else { return }
+
+                    var transaction = Transaction(animation: nil)
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        proxy.scrollTo(store.currentIndex, anchor: .center)
+                    }
+                }
                 .navigationTitle("播放队列")
                 .toolbar {
                     ToolbarItem(placement: .navigation) {

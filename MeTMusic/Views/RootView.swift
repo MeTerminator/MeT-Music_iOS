@@ -87,7 +87,7 @@ struct RootView: View {
                     if store.currentSong != nil {
                         MiniPlayerView()
                             .padding(.horizontal, 12)
-                            .padding(.vertical, 8)
+                            .padding(.vertical, MiniPlayerView.verticalPadding)
                     }
                 }
             #endif

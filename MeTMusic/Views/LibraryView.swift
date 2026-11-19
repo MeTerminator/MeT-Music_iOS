@@ -142,6 +142,10 @@ struct PlaylistDetailView: View {
                 }
             }
             .listStyle(.inset)
+            #if os(iOS)
+            // The pushed list can scroll behind the floating player.
+            .contentMargins(.bottom, store.currentSong == nil ? 0 : MiniPlayerView.paddedHeight + 8, for: .scrollContent)
+            #endif
             .macTransparentScrollBackground()
             .musicNavigationTitle(playlist.name)
             #if os(macOS)

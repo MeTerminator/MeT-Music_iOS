@@ -1,6 +1,12 @@
 import SwiftUI
 
 struct MiniPlayerView: View {
+    #if os(iOS)
+    fileprivate static let height: CGFloat = 60
+    static let verticalPadding: CGFloat = 8
+    static let paddedHeight = height + 2 * verticalPadding
+    #endif
+
     @EnvironmentObject private var store: AppStore
     @State private var showingQueue = false
 
@@ -60,7 +66,7 @@ private extension View {
         #else
         self
             .padding(.horizontal, 12)
-            .frame(height: 60)
+            .frame(height: MiniPlayerView.height)
             .background {
                 MiniPlayerGlassSurface().equatable()
             }
