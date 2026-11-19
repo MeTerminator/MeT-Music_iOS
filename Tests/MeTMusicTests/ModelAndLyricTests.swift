@@ -120,6 +120,28 @@ import Testing
         #expect(filtered[0].text == "正文")
     }
 
+    @Test func qrcWrappedPayloadSkipsTimingOnlyLinesAndFiltersCoverDesignCredits() {
+        let qrc = """
+        <?xml version="1.0" encoding="utf-8"?>
+        <QrcInfos><LyricInfo><Lyric_1 LyricType="1" LyricContent="[ti:]
+        [0,1000]测试歌曲-歌手(0,1000)
+        [2037,1018](2037,1018)
+        [4074,1000] (4074,1000)
+        [16296,1695]封面设计：(16296,900)设计者(17196,795)
+        [28530,4560]正(28530,420)文(28950,4140)
+        "/>
+        </LyricInfo></QrcInfos>
+        """
+        let response = LyricResponse(lrc: nil, lrctrans: nil, qrc: qrc, qrctrans: nil, qrcroma: nil)
+        let song = Song(id: "test", name: "测试歌曲")
+        let result = OrdinaryLyricParser.parseWithFormat(response, song: song)
+        #expect(result.format == .qrc)
+        #expect(result.lines.map(\.text) == ["正文"])
+        #expect(result.lines.first?.words.map(\.startTime) == [28_530, 28_950])
+        #expect(OrdinaryLyricParser.parse(response, removeQRCInformation: false, song: song).map(\.text)
+                == ["测试歌曲-歌手", "封面设计：设计者", "正文"])
+    }
+
     @Test(arguments: [
         "词曲:张三", "Producer:X", "作詞:山田", "編曲／混音:李四", "mixed by: Y",
         "词 Lyricist：五月天 阿信", "共同制作人 Co-Producer：詹宏业",

@@ -88,17 +88,22 @@ enum OrdinaryLyricParser {
             let start = Int64(ns.substring(with: lineMatch.range(at: 1))) ?? 0
             let duration = Int64(ns.substring(with: lineMatch.range(at: 2))) ?? 0
             let contentRange = NSRange(location: lineMatch.range.length, length: ns.length - lineMatch.range.length)
-            let words = wordPattern.matches(in: line, range: contentRange).compactMap { match -> LyricWord? in
+            let wordMatches = wordPattern.matches(in: line, range: contentRange)
+            var words = wordMatches.compactMap { match -> LyricWord? in
                 let text = decode(ns.substring(with: match.range(at: 1)))
                 guard !text.isEmpty else { return nil }
                 let wordStart = Int64(ns.substring(with: match.range(at: 2))) ?? start
                 let wordDuration = Int64(ns.substring(with: match.range(at: 3))) ?? 0
                 return .init(startTime: wordStart, endTime: wordStart + wordDuration, word: text)
             }
-            let fallback = decode(ns.substring(with: contentRange).trimmingCharacters(in: .whitespaces))
+            if wordMatches.isEmpty {
+                let text = decode(ns.substring(with: contentRange).trimmingCharacters(in: .whitespaces))
+                words = [.init(startTime: start, endTime: start + duration, word: text)]
+            }
+            guard words.contains(where: { $0.word.contains(where: { !$0.isWhitespace }) }) else { return nil }
             return LyricLine(
                 id: "qrc-\(index)-\(start)",
-                words: words.isEmpty ? [.init(startTime: start, endTime: start + duration, word: fallback)] : words,
+                words: words,
                 startTime: start,
                 endTime: start + duration
             )
@@ -206,7 +211,7 @@ private enum QRCInformationFilter {
         "音频编辑", "剪辑", "音乐编辑", "母帶", "錄音", "剪輯",
         "和聲", "器乐团队", "戏曲", "引用", "乐队", "吉他",
         "贝斯", "鼓", "键盘", "弦乐", "管乐", "打击乐",
-        "演唱", "合唱", "貝斯", "鍵盤", "弦樂", "出品",
+        "演唱", "合唱", "貝斯", "鍵盤", "弦樂", "出品", "封面设计", "封面設計",
         "特别鸣谢", "歌曲营销", "策划", "策劃", "运营", "運營",
         "推广", "推廣", "项目企划", "企划", "统筹", "总监",
         "總監", "版权", "版權", "发行", "商务", "营销",
