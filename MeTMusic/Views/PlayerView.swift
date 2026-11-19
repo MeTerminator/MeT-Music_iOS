@@ -338,8 +338,11 @@ struct PlayerView: View {
                 style: lyricStyle,
                 showTranslation: model.showTranslation,
                 onLineTap: { line in
-                    let target = lyricTapSeekTime(line: line, lyricOffsetMs: store.lyricOffsetMs)
-                    Task { await store.seek(to: target) }
+                    guard compactChrome || model.page == 1 else { return }
+                    performPlaybackAction {
+                        let target = lyricTapSeekTime(line: line, lyricOffsetMs: store.lyricOffsetMs)
+                        Task { await store.seek(to: target) }
+                    }
                 },
                 onLineBoundary: {
                     store.audio.calibrateLyricClockAtLineBoundary()

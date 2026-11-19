@@ -364,6 +364,7 @@ public struct AppleMusicLyricsView: View {
                 }
             )
             .equatable()
+            .disabled(!isActive || isPageTransitioning)
             .id(model.sourceRevision)
         }
         // Animate the whole group, including the lyric's placement.
