@@ -318,18 +318,61 @@ func lyricWordGlow(progress: Double, amount: Double) -> Double {
     return pow(sin(phase * .pi), 2) * min(max(amount, 0.12), 0.65)
 }
 
-func lyricChunkProgress(words: [LyricWord], timeMs: Int64) -> CGFloat {
+struct LyricSweepHandoff: Hashable {
+    struct Edge: Hashable {
+        var offsetMs = 0.0
+        var radiusMs = 0.0
+    }
+
+    var start = Edge()
+    var end = Edge()
+
+    static func join(_ earlier: LyricWord, _ later: LyricWord) -> (end: Edge, start: Edge)? {
+        let shorterDuration = Double(min(earlier.endTime - earlier.startTime, later.endTime - later.startTime))
+        let gap = Double(later.startTime - earlier.endTime)
+        guard shorterDuration > 0, abs(gap) <= 80, gap >= -shorterDuration / 2 else { return nil }
+        // Both ramps meet at the same visual timestamp. A brief gap becomes
+        // part of the sweep, with the timing adjustment split between words.
+        let halfGap = gap / 2
+        let radius = min(45, (shorterDuration + max(0, gap)) / 4)
+        return (.init(offsetMs: halfGap, radiusMs: radius), .init(offsetMs: -halfGap, radiusMs: radius))
+    }
+
+    func progress(elapsed: Double, duration: Double) -> Double {
+        // At a joined edge both ramps use the same time and radius, so their
+        // speeds blend without dipping to zero. Unpaired edges keep their
+        // authored timing, including the first word's onset.
+        func correction(distance: Double, radius: Double) -> Double {
+            let remaining = radius - abs(distance)
+            return remaining > 0 ? remaining * remaining / (4 * radius) : 0
+        }
+
+        let sinceStart = elapsed - start.offsetMs
+        let untilEnd = elapsed - duration - end.offsetMs
+        let visualDuration = duration + end.offsetMs - start.offsetMs
+        let swept = min(max(sinceStart, 0), visualDuration)
+            + correction(distance: sinceStart, radius: start.radiusMs)
+            - correction(distance: untilEnd, radius: end.radiusMs)
+        return swept / visualDuration
+    }
+}
+
+func lyricChunkProgress(words: [LyricWord], timeMs: Int64, handoffs: [LyricSweepHandoff] = []) -> CGFloat {
     guard !words.isEmpty else { return 0 }
     var total = 0
     var completed = 0.0
-    for word in words {
+    for (index, word) in words.enumerated() {
         let weight = max(word.word.count, 1)
         total += weight
         let progress: Double
         if word.endTime <= word.startTime {
             progress = timeMs >= word.startTime ? 1 : 0
         } else {
-            progress = min(max(Double(timeMs - word.startTime) / Double(word.endTime - word.startTime), 0), 1)
+            let handoff = handoffs.isEmpty ? LyricSweepHandoff() : handoffs[index]
+            progress = handoff.progress(
+                elapsed: Double(timeMs - word.startTime),
+                duration: Double(word.endTime - word.startTime)
+            )
         }
         completed += Double(weight) * progress
     }

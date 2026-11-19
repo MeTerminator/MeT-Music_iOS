@@ -17,6 +17,7 @@ struct LyricWordChunk: Identifiable, Hashable {
     let emphasisAmount: CGFloat
     let emphasizes: Bool
     let isSingleCJKCharacter: Bool
+    var sweepHandoffs: [LyricSweepHandoff] = []
     var breakAfter: LyricBreakOpportunity = .character
     var forcesBreakAfter = false
     var isSpace: Bool { text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
@@ -108,7 +109,7 @@ func wrapOversizedLyricChunks(_ chunks: [LyricWordChunk], width: CGFloat, fontSi
             return result
         }
     }
-    return chunks.flatMap { chunk -> [LyricWordChunk] in
+    let wrapped = chunks.flatMap { chunk -> [LyricWordChunk] in
         guard !chunk.isSpace, chunk.characters.count > 1,
               measure(chunk.displayText, separateGlyphs: chunk.emphasizes) > width else { return [chunk] }
         let characters = chunk.characters
@@ -150,6 +151,7 @@ func wrapOversizedLyricChunks(_ chunks: [LyricWordChunk], width: CGFloat, fontSi
         }
         return fragments
     }
+    return prepareLyricSweep(wrapped)
 }
 
 func groupLyricLines(_ lines: [LyricLine]) -> [LyricGroup] {
@@ -262,7 +264,28 @@ func chunkLyricWords(_ words: [LyricWord]) -> [LyricWordChunk] {
         }
     }
     flush()
-    return annotateLyricBreaks(result)
+    return prepareLyricSweep(annotateLyricBreaks(result))
+}
+
+/// Pair render words across chunks, including single-character CJK chunks.
+/// Rebuild after wrapping, where a word may have been split into fragments.
+private func prepareLyricSweep(_ source: [LyricWordChunk]) -> [LyricWordChunk] {
+    var chunks = source
+    var previous: (chunk: Int, word: Int)?
+    for chunkIndex in chunks.indices {
+        if chunks[chunkIndex].isSpace { continue }
+        chunks[chunkIndex].sweepHandoffs = Array(repeating: .init(), count: chunks[chunkIndex].words.count)
+        for wordIndex in chunks[chunkIndex].words.indices {
+            if let previous, let join = LyricSweepHandoff.join(
+                chunks[previous.chunk].words[previous.word], chunks[chunkIndex].words[wordIndex]
+            ) {
+                chunks[previous.chunk].sweepHandoffs[previous.word].end = join.end
+                chunks[chunkIndex].sweepHandoffs[wordIndex].start = join.start
+            }
+            previous = (chunkIndex, wordIndex)
+        }
+    }
+    return chunks
 }
 
 private func isCJK(_ text: String) -> Bool {

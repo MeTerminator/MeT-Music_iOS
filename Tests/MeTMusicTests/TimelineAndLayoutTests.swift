@@ -345,6 +345,41 @@ import Testing
         #expect(abs(lyricChunkProgress(words: words, timeMs: 450) - 0.8) < 0.001)
     }
 
+    @Test(arguments: [Int64(-15), 0, 15, 60, 80])
+    func lyricSweepCarriesSpeedAcrossFastSyllablesAndPreservesPauses(gap: Int64) {
+        for (first, second, third, fourth) in [("你", "好", "呀", "啊"), ("안", "녕", "해", "요")] {
+            let secondStart = 1_150 + gap
+            let secondEnd = secondStart + 40
+            let thirdStart = secondEnd + max(0, gap)
+            let thirdEnd = thirdStart + 90
+            let chunks = chunkLyricWords([
+                .init(startTime: 1_000, endTime: 1_150, word: first),
+                .init(startTime: secondStart, endTime: secondEnd, word: " " + second),
+                .init(startTime: thirdStart, endTime: thirdEnd, word: third),
+                .init(startTime: 1_600, endTime: 1_800, word: fourth),
+            ]).filter { !$0.isSpace }
+            func progress(_ index: Int, _ time: Int64) -> CGFloat {
+                let chunk = chunks[index]
+                return lyricChunkProgress(words: chunk.words, timeMs: time, handoffs: chunk.sweepHandoffs)
+            }
+            func swept(_ time: Int64) -> CGFloat {
+                chunks.indices.reduce(0) { $0 + progress($1, time) }
+            }
+
+            #expect(swept(999) == 0)
+            #expect(swept(1_000) == 0)
+            #expect(swept(1_001) > 0)
+            #expect(swept(thirdEnd) == 3)
+            #expect(swept(1_599) == 3)
+            #expect(swept(1_800) == 4)
+            for time in 1_001...thirdEnd {
+                // Sample the entire phrase, including both gaps. The combined
+                // sweep should never crawl or pause between short syllables.
+                #expect(swept(time) - swept(time - 1) >= 0.005)
+            }
+        }
+    }
+
     @Test func playbackClockInterpolatesAndSnapsOnSeek() {
         var clock = PlaybackTimeInterpolator(initialSourceTimeMs: 1_000)
         #expect(clock.update(sourceTimeMs: 1_000, frameNanoseconds: 0, isPlaying: true) == 1_000)
@@ -1082,6 +1117,8 @@ import Testing
                     #expect(fragment.displayText.hasSuffix("-"))
                     #expect(fragment.forcesBreakAfter)
                     #expect(fragment.words.last?.endTime == fragments[index + 1].words.first?.startTime)
+                    #expect(fragment.sweepHandoffs.last?.end.radiusMs ?? 0 > 0)
+                    #expect(fragment.sweepHandoffs.last?.end == fragments[index + 1].sweepHandoffs.first?.start)
                 }
             }
             #expect(wrapOversizedLyricChunks(source, width: 10_000, fontSize: 32) == source)

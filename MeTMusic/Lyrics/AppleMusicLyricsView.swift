@@ -1136,7 +1136,10 @@ private struct LyricGroupView: View, Equatable {
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
                         TimedChunkView(
-                            chunk: chunk, progress: active ? lyricChunkProgress(words: chunk.words, timeMs: timeMs) : 0,
+                            chunk: chunk,
+                            progress: active ? lyricChunkProgress(
+                                words: chunk.words, timeMs: timeMs, handoffs: chunk.sweepHandoffs
+                            ) : 0,
                             emphasisProgress: active ? lyricEmphasisProgress(words: chunk.words, timeMs: timeMs) : 0,
                             active: active, style: wordStyle,
                             lift: active ? lyricWordLift(words: chunk.words, timeMs: timeMs - (rapidTransition ? 60 : 0)) : 0,
