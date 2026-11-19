@@ -36,6 +36,7 @@ public struct AppleMusicLyricsView: View {
     public let lyricLines: [LyricLine]
     public let currentTimeMs: Int64
     public let currentTimeProvider: (@MainActor () -> Int64)?
+    public let holdsAdjacentLines: Bool
     public let lineTransitionLeadMs: Int64
     public let playbackDiscontinuityRevision: UInt
     public let isPlaying: Bool
@@ -59,6 +60,7 @@ public struct AppleMusicLyricsView: View {
         currentTimeMs: Int64,
         currentTimeProvider: (@MainActor () -> Int64)? = nil,
         lineTransitionLeadMs: Int64 = 0,
+        holdsAdjacentLines: Bool = false,
         playbackDiscontinuityRevision: UInt = 0,
         isPlaying: Bool,
         isActive: Bool = true,
@@ -76,6 +78,7 @@ public struct AppleMusicLyricsView: View {
         self.lyricLines = lyricLines
         self.currentTimeMs = currentTimeMs
         self.currentTimeProvider = currentTimeProvider
+        self.holdsAdjacentLines = holdsAdjacentLines
         self.lineTransitionLeadMs = lineTransitionLeadMs
         self.playbackDiscontinuityRevision = playbackDiscontinuityRevision
         self.isPlaying = isPlaying
@@ -94,7 +97,7 @@ public struct AppleMusicLyricsView: View {
     }
 
     public var body: some View {
-        let signature = LyricSourceSignature(lines: lyricLines, options: optimizeOptions)
+        let signature = LyricSourceSignature(lines: lyricLines, options: optimizeOptions, holdsAdjacentLines: holdsAdjacentLines)
         lyricsBody(groups: model.groups)
         .onAppear { updateSourceIfNeeded(signature) }
         .onChange(of: signature) { _, _ in
@@ -119,8 +122,7 @@ public struct AppleMusicLyricsView: View {
     }
 
     private func lyricsBody(groups: [LyricGroup]) -> some View {
-        let hasDuet = groups.contains { $0.main.isDuet }
-        return GeometryReader { geometry in
+        GeometryReader { geometry in
             ScrollViewReader { proxy in
                 ScrollView(.vertical) {
                     let updatesFrames = lyricRenderingShouldAnimate(
@@ -160,14 +162,22 @@ public struct AppleMusicLyricsView: View {
                         )
                         let snapshot = model.sync(timeMs: mediaTime, lineTransitionLeadMs: lineTransitionLeadMs)
                         let time = model.renderTimeMs
+                        // TimelineView can tick after the model replaces its lyrics.
+                        // Capture the current rows and their metadata before lazy rendering.
+                        let groups = model.groups
+                        let hasDuet = groups.contains { $0.main.isDuet }
+                        let interludeGaps = model.interludeGaps
+                        let rapidTransitions = model.rapidTransitions
+                        let sourceRevision = model.sourceRevision
                         let rowWidth = max(0, geometry.size.width - style.horizontalPadding * (hasDuet ? 4 : 2)) * style.lineWidthFraction
                         let wrappedGroups = model.wrappedGroups(width: rowWidth, fontSize: style.fontSize, backgroundScale: style.backgroundLineScale)
                         LazyVStack(spacing: style.lineSpacing) {
                             Color.clear.frame(height: geometry.size.height * style.alignPosition)
-                            ForEach(groups.indices, id: \.self) { index in
-                                let group = wrappedGroups[index]
+                            ForEach(wrappedGroups.indices, id: \.self) { index in
                                 lyricRow(
-                                    group: group, index: index, groups: groups, snapshot: snapshot,
+                                    group: wrappedGroups[index], index: index, groups: groups, snapshot: snapshot,
+                                    gap: interludeGaps[index], rapidTransition: rapidTransitions[index],
+                                    sourceRevision: sourceRevision,
                                     time: time, sampledAt: sampledAt, updatesFrames: updatesFrames,
                                     viewport: geometry.size, hasDuet: hasDuet, proxy: proxy
                                 )
@@ -196,8 +206,9 @@ public struct AppleMusicLyricsView: View {
                             lineBoundaryIndex: snapshot.playingIndices.max(),
                             positionCheckTick: Int(sampledAt.timeIntervalSince(model.timelineEpoch) * 2),
                             discontinuityRevision: playbackDiscontinuityRevision,
-                            sourceRevision: model.sourceRevision
+                            sourceRevision: sourceRevision
                         ), initial: true) { _, request in
+                            guard request.sourceRevision == model.sourceRevision else { return }
                             followLyrics(request, proxy: proxy, groups: groups, viewport: geometry.size)
                         }
                     }
@@ -282,12 +293,12 @@ public struct AppleMusicLyricsView: View {
 
     private func lyricRow(
         group: LyricGroup, index: Int, groups: [LyricGroup], snapshot: LyricTimelineSnapshot,
+        gap: LyricTimeBounds?, rapidTransition: Bool, sourceRevision: UInt,
         time: Int64, sampledAt: Date, updatesFrames: Bool, viewport: CGSize,
         hasDuet: Bool, proxy: ScrollViewProxy
     ) -> some View {
         let timelineTime = time
         let active = snapshot.playingIndices.contains(index)
-        let gap = model.interludeGaps[index]
         let showsInterlude = gap.map {
             shouldShowLyricInterlude(
                 previousEndTimeMs: $0.startTime,
@@ -323,7 +334,7 @@ public struct AppleMusicLyricsView: View {
                 clockRevision: playbackDiscontinuityRevision,
                 active: active,
                 highlighted: snapshot.highlightedIndices.contains(index),
-                rapidTransition: model.rapidTransitions[index],
+                rapidTransition: rapidTransition,
                 blurRadius: lyricUpcomingBlurRadius(
                     index: index,
                     focusIndex: snapshot.highlightedIndices.max() ?? snapshot.scrollTargetIndex,
@@ -344,6 +355,7 @@ public struct AppleMusicLyricsView: View {
                 showTranslation: showTranslation,
                 showRomanization: showRomanization,
                 onTap: {
+                    guard sourceRevision == model.sourceRevision else { return }
                     if currentTimeProvider != nil {
                         // The real seek publishes its clock revision.
                         // Do not render an invented lyric position first.
@@ -365,7 +377,7 @@ public struct AppleMusicLyricsView: View {
             )
             .equatable()
             .disabled(!isActive || isPageTransitioning)
-            .id(model.sourceRevision)
+            .id(sourceRevision)
         }
         // Animate the whole group, including the lyric's placement.
         // On exit, the dots' slot collapses as the next lyric rises
@@ -560,7 +572,10 @@ struct LyricSourceSignature: Equatable {
     let lines: [LyricLine]
     let options: OptimizeLyricOptions
 
-    init(lines: [LyricLine], options: OptimizeLyricOptions) {
+    let holdsAdjacentLines: Bool
+
+    init(lines: [LyricLine], options: OptimizeLyricOptions, holdsAdjacentLines: Bool = false) {
+        self.holdsAdjacentLines = holdsAdjacentLines
         self.lines = lines
         self.options = options
     }
@@ -665,7 +680,7 @@ final class LyricsViewModel: ObservableObject {
         let lead = max(0, lineTransitionLeadMs)
         if lead != transitionLeadMs {
             transitionLeadMs = lead
-            timeline = Self.makeTimeline(groups, lineTransitionLeadMs: lead)
+            timeline = Self.makeTimeline(groups, lineTransitionLeadMs: lead, holdsAdjacentLines: sourceSignature?.holdsAdjacentLines == true)
         }
         let resolution = tapSelection?.resolve(mediaTimeMs: timeMs, now: now)
         renderTimeMs = resolution?.timeMs ?? timeMs
@@ -778,7 +793,7 @@ final class LyricsViewModel: ObservableObject {
         mediaClock.invalidate()
         needsTimelineReanchor = true
         suppressAnimatedScrollUntil = Date.now.addingTimeInterval(0.35)
-        timeline = Self.makeTimeline(groups, lineTransitionLeadMs: transitionLeadMs)
+        timeline = Self.makeTimeline(groups, lineTransitionLeadMs: transitionLeadMs, holdsAdjacentLines: sourceSignature.holdsAdjacentLines)
         interpolator = .init(initialSourceTimeMs: timeMs)
         lastPresentationTimeMs = timeMs
         lastAutoScrollTarget = nil
@@ -912,10 +927,11 @@ final class LyricsViewModel: ObservableObject {
         return lastPresentationTimeMs
     }
 
-    private static func makeTimeline(_ groups: [LyricGroup], lineTransitionLeadMs: Int64 = 0) -> LyricTimeline {
+    private static func makeTimeline(_ groups: [LyricGroup], lineTransitionLeadMs: Int64 = 0, holdsAdjacentLines: Bool = false) -> LyricTimeline {
         .init(
             bounds: groups.map { .init(startTime: $0.renderBounds.startTime, endTime: $0.renderBounds.endTime) },
-            lineTransitionLeadMs: lineTransitionLeadMs
+            lineTransitionLeadMs: lineTransitionLeadMs,
+            holdsAdjacentLines: holdsAdjacentLines
         )
     }
 

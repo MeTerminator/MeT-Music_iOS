@@ -17,8 +17,8 @@ public final class LyricTimeline {
         playingIndices: [], highlightedIndices: [], scrollTargetIndex: 0, isSeeking: false
     )
 
-    public init(bounds authoredBounds: [LyricTimeBounds], lineTransitionLeadMs: Int64 = 0) {
-        let bounds = lyricTransitionBounds(authoredBounds, lineTransitionLeadMs: lineTransitionLeadMs)
+    public init(bounds authoredBounds: [LyricTimeBounds], lineTransitionLeadMs: Int64 = 0, holdsAdjacentLines: Bool = false) {
+        let bounds = lyricTransitionBounds(authoredBounds, lineTransitionLeadMs: lineTransitionLeadMs, holdsAdjacentLines: holdsAdjacentLines)
         self.bounds = bounds
         startOrder = bounds.indices.sorted {
             bounds[$0].startTime == bounds[$1].startTime ? $0 < $1 : bounds[$0].startTime < bounds[$1].startTime

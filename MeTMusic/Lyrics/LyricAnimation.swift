@@ -16,20 +16,30 @@ public func lyricPresentationTime(mediaPositionMs: Int64, lyricOffsetMs: Int64) 
     mediaPositionMs + lyricOffsetMs
 }
 
-/// Anticipation changes activation starts, never the clock or line ends.
+let lyricInterludeMinimumGapMs: Int64 = 4_000
+
+/// Anticipation changes line focus while word timing stays on the media clock.
 /// Spend only the silent gap before a line; authored overlapping vocals keep
 /// their original start instead of being delayed or advanced further.
-func lyricTransitionBounds(_ bounds: [LyricTimeBounds], lineTransitionLeadMs: Int64) -> [LyricTimeBounds] {
+func lyricTransitionBounds(_ bounds: [LyricTimeBounds], lineTransitionLeadMs: Int64, holdsAdjacentLines: Bool = false) -> [LyricTimeBounds] {
     let lead = max(0, lineTransitionLeadMs)
-    guard lead > 0 else { return bounds }
+    guard lead > 0 || holdsAdjacentLines else { return bounds }
     var previousEnd: Int64 = 0
-    return bounds.map { bound in
+    var result: [LyricTimeBounds] = []
+    for bound in bounds {
         defer { previousEnd = max(previousEnd, bound.endTime) }
-        return .init(
-            startTime: min(bound.startTime, max(previousEnd, bound.startTime - lead)),
-            endTime: bound.endTime
-        )
+        let gap = bound.startTime - previousEnd
+        var start = min(bound.startTime, max(previousEnd, bound.startTime - lead))
+        if holdsAdjacentLines, gap > 0, gap < lyricInterludeMinimumGapMs,
+           let last = result.indices.last, result[last].endTime == previousEnd,
+           result[last].startTime < previousEnd {
+            // Share a very short gap between holding the completed line and scrolling.
+            start = bound.startTime - min(lead, gap / 2)
+            result[last].endTime = start
+        }
+        result.append(.init(startTime: start, endTime: bound.endTime))
     }
+    return result
 }
 
 /// Line opacity depends on playback emphasis, never on the number of timed
@@ -435,7 +445,7 @@ struct LyricTapSelection {
 
 /// Silence begins after ALL earlier voices have ended, including background
 /// vocals. Index zero represents a leading instrumental section.
-func lyricInterludeGaps(bounds: [LyricRenderBounds], minimumGapMs: Int64 = 4_000) -> [LyricTimeBounds?] {
+func lyricInterludeGaps(bounds: [LyricRenderBounds], minimumGapMs: Int64 = lyricInterludeMinimumGapMs) -> [LyricTimeBounds?] {
     var previousEnd: Int64 = 0
     return bounds.map { bound in
         defer { previousEnd = max(previousEnd, bound.endTime) }

@@ -426,6 +426,21 @@ import Testing
         #expect(sweeps[2].maskProgress(phase: sweeps[2].phase(at: 35_390), bandFraction: 0.5) > 0)
     }
 
+    @Test func qrcHoldsCompletedLineUntilHandoffButEndsAtInterludeAndOutro() {
+        // The last two lines use the QRC timings from 演员.
+        let timeline = LyricTimeline(bounds: [
+            .init(startTime: 235_438, endTime: 237_325),
+            .init(startTime: 241_325, endTime: 245_220),
+            .init(startTime: 246_177, endTime: 248_976)
+        ], lineTransitionLeadMs: 100, holdsAdjacentLines: true)
+        #expect(timeline.sync(timeMs: 237_325).highlightedIndices.isEmpty)
+        #expect(timeline.sync(timeMs: 245_220).highlightedIndices == [1])
+        #expect(timeline.sync(timeMs: 246_076).highlightedIndices == [1])
+        #expect(timeline.sync(timeMs: 246_077).highlightedIndices == [2])
+        #expect(timeline.sync(timeMs: 248_976).highlightedIndices.isEmpty)
+        #expect(timeline.sync(timeMs: 245_800, forceSeek: true).highlightedIndices == [1])
+    }
+
     @Test func playbackClockInterpolatesAndSnapsOnSeek() {
         var clock = PlaybackTimeInterpolator(initialSourceTimeMs: 1_000)
         #expect(clock.update(sourceTimeMs: 1_000, frameNanoseconds: 0, isPlaying: true) == 1_000)
