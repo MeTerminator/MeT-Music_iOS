@@ -17,6 +17,7 @@ struct LyricWordChunk: Identifiable, Hashable {
     let emphasisAmount: CGFloat
     let emphasizes: Bool
     let isSingleCJKCharacter: Bool
+    var characterSweep: LyricCharacterSweep?
     var sweepHandoffs: [LyricSweepHandoff] = []
     var breakAfter: LyricBreakOpportunity = .character
     var forcesBreakAfter = false
@@ -285,6 +286,53 @@ private func prepareLyricSweep(_ source: [LyricWordChunk]) -> [LyricWordChunk] {
             previous = (chunkIndex, wordIndex)
         }
     }
+    // A joined CJK phrase has one moving gradient. Each glyph samples its
+    // own slice, including the feather spilling over from the adjacent glyph.
+    let sung = chunks.indices.filter { !chunks[$0].isSpace }
+    var run: [Int] = []
+    func finishRun() {
+        defer { run.removeAll(keepingCapacity: true) }
+        guard run.count >= 2 else { return }
+        let starts = run.map { Double(chunks[$0].words[0].startTime) }
+        let ends = run.map { Double(chunks[$0].words[0].endTime) }
+        let boundaries = [starts[0]] + (1..<run.count).map { (ends[$0 - 1] + starts[$0]) / 2 } + [ends.last!]
+        for (i, index) in run.enumerated() {
+            chunks[index].characterSweep = LyricCharacterSweep(
+                start: boundaries[i], end: boundaries[i + 1],
+                previousStart: i > 0 ? boundaries[i - 1] : nil,
+                nextEnd: i + 2 < boundaries.count ? boundaries[i + 2] : nil
+            )
+        }
+    }
+    func nearbyGap(at position: Int) -> Int64? {
+        guard position >= 0, position + 1 < sung.count else { return nil }
+        let left = chunks[sung[position]], right = chunks[sung[position + 1]]
+        guard left.isSingleCJKCharacter, right.isSingleCJKCharacter,
+              let earlier = left.words.last, let later = right.words.first else { return nil }
+        return later.startTime - earlier.endTime
+    }
+    for (position, index) in sung.enumerated() {
+        chunks[index].characterSweep = nil
+        guard chunks[index].isSingleCJKCharacter, let word = chunks[index].words.first,
+              word.endTime > word.startTime else {
+            finishRun()
+            continue
+        }
+        if let previous = run.last {
+            let prior = chunks[previous].words[0]
+            let gap = word.startTime - prior.endTime
+            let shorter = min(prior.endTime - prior.startTime, word.endTime - word.startTime)
+            // Allow more breathing room at a slower cadence, while keeping
+            // a hard ceiling so a rest between sustained notes stays silent.
+            let regularGap = gap <= 80 || [nearbyGap(at: position - 2), nearbyGap(at: position)]
+                .compactMap { $0 }.contains { abs($0 - gap) <= gap / 3 }
+            if !regularGap || gap > min(200, max(80, shorter / 2)) || gap < -min(80, shorter / 2) {
+                finishRun()
+            }
+        }
+        run.append(index)
+    }
+    finishRun()
     return chunks
 }
 

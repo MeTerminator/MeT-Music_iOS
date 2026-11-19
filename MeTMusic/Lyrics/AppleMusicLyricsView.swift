@@ -1137,7 +1137,7 @@ private struct LyricGroupView: View, Equatable {
                     } else {
                         TimedChunkView(
                             chunk: chunk,
-                            progress: active ? lyricChunkProgress(
+                            progress: active ? chunk.characterSweep?.phase(at: timeMs) ?? lyricChunkProgress(
                                 words: chunk.words, timeMs: timeMs, handoffs: chunk.sweepHandoffs
                             ) : 0,
                             emphasisProgress: active ? lyricEmphasisProgress(words: chunk.words, timeMs: timeMs) : 0,
@@ -1283,7 +1283,7 @@ private struct TimedChunkView: View, Equatable {
     var hasRomanLine: Bool
 
     nonisolated static func == (lhs: Self, rhs: Self) -> Bool {
-        lhs.chunk.id == rhs.chunk.id && lhs.progress == rhs.progress && lhs.active == rhs.active
+        lhs.chunk.id == rhs.chunk.id && lhs.chunk.characterSweep == rhs.chunk.characterSweep && lhs.progress == rhs.progress && lhs.active == rhs.active
             && lhs.emphasisProgress == rhs.emphasisProgress
             && lhs.lift == rhs.lift && lhs.effectsEnabled == rhs.effectsEnabled
             && lhs.backgroundVocal == rhs.backgroundVocal
@@ -1334,7 +1334,7 @@ private struct TimedChunkView: View, Equatable {
                         .foregroundStyle(style.activeColor)
                         .padding(bleed)
                         .mask {
-                            WordProgressMask(progress: progress, fadeWidth: style.fontSize * style.wordFadeWidth, contentInset: bleed)
+                            WordProgressMask(progress: progress, characterSweep: chunk.characterSweep, fadeWidth: style.fontSize * style.wordFadeWidth, contentInset: bleed)
                         }
                         // Place the broad halo after the sweep mask so the
                         // luminous edge can feather beyond the sung glyphs.
@@ -1442,13 +1442,18 @@ private struct EmphasisGlyphLayout: Layout {
 
 private struct WordProgressMask: View {
     let progress: CGFloat
+    let characterSweep: LyricCharacterSweep?
     let fadeWidth: CGFloat
     let contentInset: CGFloat
 
     var body: some View {
         GeometryReader { geometry in
+            let width = max(1, geometry.size.width - contentInset * 2)
+            let maskProgress = characterSweep?.maskProgress(
+                phase: progress, bandFraction: min(0.5, max(0, fadeWidth) / width)
+            ) ?? progress
             let stops = lyricProgressMaskStops(
-                progress: progress,
+                progress: maskProgress,
                 surfaceWidth: geometry.size.width,
                 contentInset: contentInset,
                 fadeWidth: fadeWidth
@@ -1468,7 +1473,7 @@ private struct WordProgressMask: View {
             )
             // Keep a single mask identity at 0 and 1 too. At completion the
             // opaque band covers every glyph; no brightness handoff is needed.
-            .opacity(progress <= 0 ? 0 : 1)
+            .opacity(maskProgress <= 0 ? 0 : 1)
         }
     }
 }

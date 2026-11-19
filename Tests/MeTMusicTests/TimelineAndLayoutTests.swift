@@ -380,6 +380,52 @@ import Testing
         }
     }
 
+    @Test(arguments: ["我们还在", "あしたも", "우리함께"])
+    func characterMaskMovesContinuouslyAcrossRegularGaps(text: String) throws {
+        let words = text.enumerated().map { index, character in
+            let start = Int64(index * 420)
+            return LyricWord(startTime: start, endTime: start + 300, word: String(character))
+        }
+        let sweeps = try chunkLyricWords(words).map { try #require($0.characterSweep) }
+        // Both glyphs must draw the same gradient head in phrase coordinates,
+        // even when it falls inside the 120 ms gap on either side of the join.
+        for time in 735...825 {
+            let left = sweeps[1].maskProgress(phase: sweeps[1].phase(at: Int64(time)), bandFraction: 0.5)
+            let right = sweeps[2].maskProgress(phase: sweeps[2].phase(at: Int64(time)), bandFraction: 0.5)
+            #expect(abs((left - right) * 1.5 - 1) < 0.00001)
+            #expect(abs((left * 1.5 - 0.25) - Double(time - 360) / 420) < 0.00001)
+        }
+    }
+
+    @Test func isolatedGapBreaksAnOtherwiseContiguousCharacterSweep() throws {
+        let chunks = chunkLyricWords([
+            .init(startTime: 0, endTime: 400, word: "あ"),
+            .init(startTime: 400, endTime: 800, word: "い"),
+            .init(startTime: 940, endTime: 1340, word: "う"),
+            .init(startTime: 1340, endTime: 1740, word: "え"),
+        ])
+        let before = try #require(chunks[1].characterSweep)
+        let after = try #require(chunks[2].characterSweep)
+        #expect(before.nextEnd == nil)
+        #expect(after.previousStart == nil)
+    }
+
+    @Test func characterSweepHonorsAuthoredPauseInBuGai() throws {
+        // Two adjoining notes on each side of the rest in the second line.
+        let words = [
+            LyricWord(startTime: 34_193, endTime: 34_649, word: "演"),
+            LyricWord(startTime: 34_649, endTime: 34_941, word: "不"),
+            LyricWord(startTime: 35_389, endTime: 35_740, word: "出"),
+            LyricWord(startTime: 35_740, endTime: 36_403, word: "来"),
+        ]
+        let sweeps = try chunkLyricWords(words).map { try #require($0.characterSweep) }
+        for time: Int64 in [34_941, 35_165, 35_388, 35_389] {
+            #expect(sweeps[1].maskProgress(phase: sweeps[1].phase(at: time), bandFraction: 0.5) == 1)
+            #expect(sweeps[2].maskProgress(phase: sweeps[2].phase(at: time), bandFraction: 0.5) == 0)
+        }
+        #expect(sweeps[2].maskProgress(phase: sweeps[2].phase(at: 35_390), bandFraction: 0.5) > 0)
+    }
+
     @Test func playbackClockInterpolatesAndSnapsOnSeek() {
         var clock = PlaybackTimeInterpolator(initialSourceTimeMs: 1_000)
         #expect(clock.update(sourceTimeMs: 1_000, frameNanoseconds: 0, isPlaying: true) == 1_000)

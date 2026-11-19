@@ -318,6 +318,34 @@ func lyricWordGlow(progress: Double, amount: Double) -> Double {
     return pow(sin(phase * .pi), 2) * min(max(amount, 0.12), 0.65)
 }
 
+/// Position of the shared highlight in local glyph widths. Adjacent glyphs
+/// use the same time interval on either side of their common boundary.
+struct LyricCharacterSweep: Hashable {
+    let start: Double
+    let end: Double
+    let previousStart: Double?
+    let nextEnd: Double?
+
+    func phase(at timeMs: Int64) -> CGFloat {
+        let time = Double(timeMs)
+        if time < start, let previousStart {
+            return max(-1, (time - start) / (start - previousStart))
+        }
+        if time > end, let nextEnd {
+            return min(2, 1 + (time - end) / (nextEnd - end))
+        }
+        return min(1, max(0, (time - start) / (end - start)))
+    }
+
+    func maskProgress(phase: CGFloat, bandFraction: CGFloat) -> CGFloat {
+        // Move the entire feather onto/off the phrase at its authored ends.
+        let entry = previousStart == nil ? max(0, 1 - 2 * phase) : 0
+        let exit = nextEnd == nil ? max(0, 2 * phase - 1) : 0
+        let head = phase + (exit - entry) * bandFraction / 2
+        return min(1, max(0, (head + bandFraction / 2) / (1 + bandFraction)))
+    }
+}
+
 struct LyricSweepHandoff: Hashable {
     struct Edge: Hashable {
         var offsetMs = 0.0
