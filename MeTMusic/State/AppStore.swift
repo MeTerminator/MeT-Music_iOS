@@ -271,7 +271,7 @@ final class AppStore: ObservableObject {
             while let self {
                 guard !Task.isCancelled, request == accurateSeekGeneration, generation == playbackGeneration else { return }
                 guard let target = takeRequestedSeekTarget(applied: applied) else { break }
-                if await applySeek(to: target) { applied = target }
+                applied = await applySeek(to: target) ? target : nil
             }
             guard let self, request == accurateSeekGeneration, generation == playbackGeneration else { return }
             // Every tap pins its target, including one this transaction already

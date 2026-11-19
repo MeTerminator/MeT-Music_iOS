@@ -151,7 +151,10 @@ final class AudioPlayer: ObservableObject {
            ) {
             return loaded
         }
-        let item = AVPlayerItem(url: url)
+        // Zero seek tolerance alone cannot correct an estimated time-to-byte
+        // mapping, particularly for variable-bit-rate streams.
+        let asset = AVURLAsset(url: url, options: [AVURLAssetPreferPreciseDurationAndTimingKey: true])
+        let item = AVPlayerItem(asset: asset)
         observe(item)
         player.replaceCurrentItem(with: item)
         player.volume = volume
@@ -263,16 +266,17 @@ final class AudioPlayer: ObservableObject {
     /// tries again while it disagrees with the target.
     private func performVerifiedSeek(to target: Int64, request: Int) async -> Bool {
         if filePlayer != nil { return seekFileEngine(to: target) }
+        let revision = pendingSeekRevision
         var landed = false
         for _ in 0..<seekAttempts {
-            guard request == generation else { return false }
-            let isSeekable = await waitUntilSeekable(target, request: request)
-            guard request == generation else { return false }
+            guard request == generation, pendingSeekRevision == revision else { return false }
+            let isSeekable = await waitUntilSeekable(target, request: request, revision: revision)
+            guard request == generation, pendingSeekRevision == revision else { return false }
             // Media that never reported the position as seekable still gets one
             // best-effort attempt, but no second wait: retrying only pays off
             // when the player disagreed with a position it could serve.
             let finished = await seekPrecisely(to: target)
-            guard request == generation else { return false }
+            guard request == generation, pendingSeekRevision == revision else { return false }
             let actual = playerPositionMs(fallback: target)
             if seekLandedOnTarget(finished: finished, actualPositionMs: actual, targetPositionMs: target) {
                 landed = true
@@ -280,7 +284,7 @@ final class AudioPlayer: ObservableObject {
             }
             if !isSeekable { break }
         }
-        guard request == generation else { return landed }
+        guard request == generation, pendingSeekRevision == revision else { return false }
         pendingSeekRevision = nil
         clockIsAuthoritative = hasLoadedMedia
         suppressPeriodicPositionUpdatesUntil = Date.now.addingTimeInterval(0.15)
@@ -293,9 +297,9 @@ final class AudioPlayer: ObservableObject {
     /// Waits until the current item is loaded far enough to seek to `target`.
     /// A cached local file passes immediately; a stream that has not buffered
     /// the position yet would otherwise silently land somewhere else.
-    private func waitUntilSeekable(_ target: Int64, request: Int) async -> Bool {
+    private func waitUntilSeekable(_ target: Int64, request: Int, revision: UInt?) async -> Bool {
         for _ in 0..<seekReadinessAttempts {
-            guard request == generation, let item = player.currentItem else { return false }
+            guard request == generation, pendingSeekRevision == revision, let item = player.currentItem else { return false }
             if item.status == .failed { return false }
             if item.status == .readyToPlay,
                seekableRangesCover(target, ranges: item.seekableTimeRanges.map(\.timeRangeValue)) {
@@ -303,7 +307,7 @@ final class AudioPlayer: ObservableObject {
             }
             try? await Task.sleep(for: .milliseconds(20))
         }
-        return player.currentItem?.status == .readyToPlay
+        return false
     }
 
     private func clamped(_ positionMs: Int64) -> Int64 {
