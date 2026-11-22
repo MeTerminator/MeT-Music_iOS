@@ -194,7 +194,7 @@ import Testing
         #expect(OrdinaryLyricParser.parse(lrcOnly).first?.text == "正文")
     }
 
-    @Test func transitionLeadAppliesOnlyToActuallyParsedQRC() {
+    @Test func lineTransitionUsesResolvedLyricFormat() {
         let qrc = OrdinaryLyricParser.parseWithFormat(qrcResponse(["正文"]))
         #expect(qrc.format == .qrc)
         #expect(qrc.format.transitionLeadMs(configuredMs: 100) == 100)
@@ -202,7 +202,11 @@ import Testing
             lrc: "[00:01.00]正文", lrctrans: nil, qrc: "invalid", qrctrans: nil, qrcroma: nil))
         #expect(fallback.format == .lrc)
         #expect(fallback.format.transitionLeadMs(configuredMs: 100) == 0)
-        #expect(LyricFormat.ttml.transitionLeadMs(configuredMs: 100) == 0)
+        #expect(LyricFormat.ttml.transitionLeadMs(configuredMs: 100) == 100)
+        #expect(LyricFormat.ttml.holdsAdjacentLines)
+        #expect(qrc.format.holdsAdjacentLines)
+        #expect(!fallback.format.holdsAdjacentLines)
+        #expect(!LyricFormat.yrc.holdsAdjacentLines)
         #expect(LyricFormat.qrc.transitionLeadMs(configuredMs: 0) == 0)
     }
 

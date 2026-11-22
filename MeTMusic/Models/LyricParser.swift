@@ -3,8 +3,10 @@ import Foundation
 enum LyricFormat {
     case lrc, qrc, yrc, ttml
 
+    var holdsAdjacentLines: Bool { self == .qrc || self == .ttml }
+
     func transitionLeadMs(configuredMs: Int64) -> Int64 {
-        self == .qrc || self == .yrc ? configuredMs : 0
+        holdsAdjacentLines || self == .yrc ? configuredMs : 0
     }
 }
 

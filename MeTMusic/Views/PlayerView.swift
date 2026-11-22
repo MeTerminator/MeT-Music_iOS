@@ -355,7 +355,7 @@ struct PlayerView: View {
                     )
                 },
                 lineTransitionLeadMs: store.effectiveLyricLeadMs,
-                holdsAdjacentLines: store.lyricFormat == .qrc,
+                holdsAdjacentLines: store.lyricFormat.holdsAdjacentLines,
                 playbackDiscontinuityRevision: store.audio.playbackDiscontinuityRevision,
                 isPlaying: store.audio.isPlaying,
                 isActive: compactChrome || model.page == 1,

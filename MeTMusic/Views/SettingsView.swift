@@ -165,7 +165,7 @@ struct SettingsView: View {
                 UserDefaults.standard.set(Int($0), forKey: "lyric_offset")
               }), in: -3_000...3_000, step: 50)
           Stepper(
-            "QRC / YRC 提前步进：\(store.lyricLeadMs) ms",
+            "QRC / YRC / TTML 提前步进：\(store.lyricLeadMs) ms",
             value: Binding(
               get: { store.lyricLeadMs },
               set: {
